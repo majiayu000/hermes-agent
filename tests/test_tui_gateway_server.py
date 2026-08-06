@@ -9,9 +9,47 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
+import hermes_cli.voice
+import tools.tts_tool
+import tools.voice_mode
 from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 from hermes_cli.active_sessions import active_session_registry_snapshot
 from tui_gateway import server
+
+
+# Texts the turn-dispatcher speak branch tried to voice, recorded by the
+# ``_silence_real_voice_output`` stub. Regression tests inspect this to prove
+# the branch fired without reaching real TTS synthesis.
+_SPOKEN_BY_TURN_DISPATCHER: list = []
+
+
+def _fail_real_tts(*args, **kwargs):
+    raise AssertionError(
+        "real TTS synthesis reached from tests — voice output must stay stubbed"
+    )
+
+
+@pytest.fixture(autouse=True)
+def _silence_real_voice_output(monkeypatch):
+    """Keep every test in this file silent even with HERMES_VOICE_TTS=1 set.
+
+    The turn-dispatcher speak branch imports ``hermes_cli.voice.speak_text``
+    lazily at call time, so patching attributes on ``server`` cannot
+    intercept it — patch the source-module attributes instead. Without this
+    guard a dev shell exporting ``HERMES_VOICE_TTS=1`` turns every
+    turn-completion test into real edge-tts synthesis + afplay playback
+    audible on the user's speakers.
+    """
+    _SPOKEN_BY_TURN_DISPATCHER.clear()
+    monkeypatch.setattr(
+        hermes_cli.voice,
+        "speak_text",
+        lambda text: _SPOKEN_BY_TURN_DISPATCHER.append(text),
+    )
+    monkeypatch.setattr(tools.tts_tool, "text_to_speech_tool", _fail_real_tts)
+    monkeypatch.setattr(tools.voice_mode, "play_audio_file", lambda path: True)
 
 
 def test_session_create_rejects_at_active_session_limit(monkeypatch, tmp_path):
@@ -660,6 +698,60 @@ def test_voice_toggle_tts_branch_also_carries_record_key(monkeypatch):
 
     assert tts_resp["result"]["record_key"] == "ctrl+space"
     assert tts_resp["result"]["tts"] is True
+
+
+def test_turn_complete_with_voice_tts_env_leak_never_speaks_for_real(monkeypatch):
+    """HERMES_VOICE_TTS=1 leaking into the test env must stay silent.
+
+    Regression: the turn-dispatcher speak branch lazily imports
+    ``hermes_cli.voice.speak_text``; before the module-level autouse guard a
+    dev shell exporting HERMES_VOICE_TTS=1 made every turn-completion test
+    synthesize real edge-tts audio and play it through afplay (audible as a
+    fast female voice reading the fixture reply, e.g. "partial answer
+    complete"). Assert the branch fires into the stub and real synthesis is
+    unreachable (the tripwire fixture would fail the test otherwise).
+    """
+    monkeypatch.setenv("HERMES_VOICE_TTS", "1")
+
+    class _Agent:
+        model = "model-speak"
+
+        def run_conversation(self, prompt, conversation_history=None, stream_callback=None):
+            return {
+                "final_response": "partial answer complete",
+                "messages": [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": "partial answer complete"},
+                ],
+            }
+
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+    monkeypatch.setattr(server, "_session_info", lambda agent: {"model": agent.model})
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
+
+    server._sessions["sid-speak"] = _session(agent=_Agent())
+    try:
+        submit = server.handle_request(
+            {
+                "id": "submit-speak",
+                "method": "prompt.submit",
+                "params": {"session_id": "sid-speak", "text": "hi"},
+            }
+        )
+        assert submit["result"]["status"] == "streaming"
+
+        deadline = time.monotonic() + 5
+        while (
+            time.monotonic() < deadline
+            and "partial answer complete" not in _SPOKEN_BY_TURN_DISPATCHER
+        ):
+            time.sleep(0.02)
+
+        assert _SPOKEN_BY_TURN_DISPATCHER == ["partial answer complete"]
+    finally:
+        server._sessions.pop("sid-speak", None)
 
 
 def test_load_enabled_toolsets_prefers_tui_env(monkeypatch):
