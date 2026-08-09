@@ -1395,6 +1395,126 @@ async def test_runtime_bridge_blocks_unchanged_non_retryable_tool_retry():
 
 
 @pytest.mark.asyncio
+async def test_runtime_media_requires_exact_catalog_contract_before_submission():
+    queue = asyncio.Queue()
+    session = RuntimeBridgeSession(
+        "run_media_schema_required",
+        asyncio.get_running_loop(),
+        queue,
+        [
+            {"name": "media.model_catalog", "input_schema": {"type": "object"}},
+            {"name": "media.generate_image", "input_schema": {"type": "object"}},
+        ],
+        10_000,
+        "agent_media_schema_required",
+        _runtime_call_db(
+            "agent_media_schema_required",
+            ("call_generate", "media.generate_image"),
+        ),
+    )
+    call = asyncio.create_task(asyncio.to_thread(
+        session.invoke_platform_tool,
+        "media.generate_image",
+        {"requests": [{"model": "openai/gpt-image-2/text-to-image", "prompt": "poster"}]},
+        "call_generate",
+    ))
+    request = await queue.get()
+    assert request["payload"]["name"] == "media.model_catalog"
+    assert request["payload"]["arguments"] == {
+        "action": "get",
+        "model_id": "openai/gpt-image-2/text-to-image",
+    }
+    assert session.submit_result({
+        "call_id": request["payload"]["call_id"],
+        "ok": False,
+        "error": {
+            "code": "model_not_found",
+            "message": "model schema unavailable",
+            "retryable": False,
+        },
+    })
+    result = json.loads(await call)
+    assert result["error"]["code"] == "model_schema_unavailable"
+    assert result["error"]["retryable"] is False
+    assert queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_runtime_media_uses_catalog_contract_and_rejects_domain_ratio_field():
+    queue = asyncio.Queue()
+    model = "openai/gpt-image-2/text-to-image"
+    session = RuntimeBridgeSession(
+        "run_media_schema",
+        asyncio.get_running_loop(),
+        queue,
+        [
+            {"name": "media.model_catalog", "input_schema": {"type": "object"}},
+            {"name": "media.generate_image", "input_schema": {"type": "object"}},
+        ],
+        10_000,
+        "agent_media_schema",
+        _runtime_call_db(
+            "agent_media_schema",
+            ("call_generate_bad", "media.generate_image"),
+            ("call_generate_good", "media.generate_image"),
+        ),
+    )
+    invalid_call = asyncio.create_task(asyncio.to_thread(
+        session.invoke_platform_tool,
+        "media.generate_image",
+        {"requests": [{"model": model, "prompt": "poster", "aspect_ratio": "3:2"}]},
+        "call_generate_bad",
+    ))
+    catalog_request = await queue.get()
+    assert catalog_request["payload"]["name"] == "media.model_catalog"
+    assert session.submit_result({
+        "call_id": catalog_request["payload"]["call_id"],
+        "ok": True,
+        "result": {
+            "selected_model": model,
+            "models": [{
+                "model": model,
+                "parameters": [
+                    {"name": "prompt", "type": "string", "required": True},
+                    {
+                        "name": "size",
+                        "type": "string",
+                        "required": False,
+                        "options": ["1024x1024", "1536x1024"],
+                        "description": "Arbitrary resolutions are supported as WIDTHxHEIGHT strings.",
+                    },
+                    {
+                        "name": "quality",
+                        "type": "string",
+                        "required": False,
+                        "options": ["low", "medium", "high"],
+                    },
+                ],
+            }],
+        },
+    })
+    invalid = json.loads(await invalid_call)
+    assert invalid["error"]["code"] == "invalid_tool_arguments"
+    assert "aspect_ratio" in invalid["error"]["message"]
+    assert queue.empty()
+
+    generated = asyncio.create_task(asyncio.to_thread(
+        session.invoke_platform_tool,
+        "media.generate_image",
+        {"requests": [{"model": model, "prompt": "poster", "size": "2304x1536"}]},
+        "call_generate_good",
+    ))
+    request = await queue.get()
+    assert request["payload"]["arguments"]["requests"][0]["size"] == "2304x1536"
+    assert session.submit_result({
+        "call_id": "call_generate_good",
+        "ok": True,
+        "result": {"delivery_status": "ready"},
+    })
+    assert json.loads(await generated) == {"delivery_status": "ready"}
+
+
+@pytest.mark.asyncio
 async def test_runtime_bridge_allows_one_corrected_argument_attempt_then_halts():
     queue = asyncio.Queue()
     session = RuntimeBridgeSession(

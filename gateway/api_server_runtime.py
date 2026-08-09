@@ -62,6 +62,12 @@ _LOCAL_ACTIVITY_TOOLS = {
     "web_extract",
 }
 _MAX_ARGUMENT_CORRECTIONS = 1
+_MODEL_SCHEMA_GATED_MEDIA_TOOLS = frozenset({
+    "media.estimate_cost",
+    "media.generate_image",
+    "media.generate_video",
+})
+_MODEL_SCHEMA_ENVELOPE_FIELDS = frozenset({"request_id", "model", "medias"})
 _FAILED_ALLOWED_STRING_FIELDS = {"media_type", "model", "provider"}
 _FAILED_ALLOWED_STRING_LIST_FIELDS = {"aspect_ratios", "resolutions"}
 _FAILED_ALLOWED_INTEGER_LIST_FIELDS = {"durations"}
@@ -426,6 +432,165 @@ def _failed_tool_result_projection(transport: Any) -> dict[str, Any]:
         return _invalid_failed_tool_result()
     projection["result"] = {"allowed": dict(allowed)}
     return projection
+
+
+def _catalog_parameter_contract(result: Any) -> tuple[str, dict[str, dict[str, Any]]] | None:
+    """Extract one exact model contract from a successful catalog get result."""
+    if not isinstance(result, dict):
+        return None
+    selected_model = str(result.get("selected_model") or "").strip()
+    models = result.get("models")
+    if not selected_model or not isinstance(models, list) or len(models) != 1:
+        return None
+    model = models[0]
+    if not isinstance(model, dict) or str(model.get("model") or "").strip() != selected_model:
+        return None
+    parameters = model.get("parameters")
+    if not isinstance(parameters, list) or not parameters:
+        return None
+    contract: dict[str, dict[str, Any]] = {}
+    for parameter in parameters:
+        if not isinstance(parameter, dict):
+            return None
+        name = str(parameter.get("name") or "").strip()
+        parameter_type = str(parameter.get("type") or "").strip()
+        if not name or not parameter_type or name in contract:
+            return None
+        contract[name] = {
+            "type": parameter_type,
+            "required": parameter.get("required") is True,
+            "options": list(parameter.get("options") or []),
+            "description": str(parameter.get("description") or ""),
+        }
+    return selected_model, contract
+
+
+def _parameter_value_matches_type(value: Any, parameter_type: str) -> bool:
+    parameter_type = parameter_type.lower()
+    if parameter_type == "string":
+        return isinstance(value, str)
+    if parameter_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if parameter_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if parameter_type == "boolean":
+        return isinstance(value, bool)
+    if parameter_type == "array":
+        return isinstance(value, list)
+    if parameter_type == "object":
+        return isinstance(value, dict)
+    return False
+
+
+def _arbitrary_image_size_is_valid(value: Any, description: str) -> bool:
+    if not isinstance(value, str) or "arbitrary" not in description.lower():
+        return False
+    match = re.fullmatch(r"([1-9][0-9]*)x([1-9][0-9]*)", value.strip().lower())
+    if match is None:
+        return False
+    width, height = int(match.group(1)), int(match.group(2))
+    return (
+        width % 16 == 0
+        and height % 16 == 0
+        and 1 / 3 <= width / height <= 3
+        and max(width, height) <= 3840
+        and width * height <= 3840 * 2160
+    )
+
+
+def _model_request_contract_error(
+    tool_name: str,
+    args: Any,
+    contracts: dict[str, dict[str, dict[str, Any]]],
+) -> dict[str, Any] | None:
+    """Validate media requests against contracts fetched for their exact models."""
+    if tool_name not in _MODEL_SCHEMA_GATED_MEDIA_TOOLS:
+        return None
+    requests = args.get("requests") if isinstance(args, dict) else None
+    if not isinstance(requests, list) or not requests:
+        return None  # The platform tool schema owns the generic envelope error.
+    for index, request in enumerate(requests):
+        if not isinstance(request, dict):
+            continue
+        model = str(request.get("model") or "").strip()
+        if not model:
+            continue
+        contract = contracts.get(model)
+        if contract is None:
+            return {
+                "error": {
+                    "code": "model_schema_required",
+                    "message": (
+                        f"Before calling {tool_name}, call media.model_catalog with "
+                        f'{{"action":"get","model_id":{json.dumps(model)}}} and use '
+                        "that exact model contract to choose its literal parameters."
+                    ),
+                    "retryable": True,
+                }
+            }
+        supplied = set(request) - _MODEL_SCHEMA_ENVELOPE_FIELDS
+        unknown = sorted(supplied - set(contract))
+        if unknown:
+            allowed_parts = []
+            for parameter_name in sorted(contract):
+                options = contract[parameter_name]["options"]
+                if options:
+                    allowed_parts.append(f"{parameter_name}={options}")
+                else:
+                    allowed_parts.append(parameter_name)
+            return {
+                "error": {
+                    "code": "invalid_tool_arguments",
+                    "message": (
+                        f"requests[{index}] contains parameters not declared by model "
+                        f"{model!r}: {', '.join(unknown)}. Allowed literal parameters: "
+                        f"{'; '.join(allowed_parts)}"
+                    ),
+                    "retryable": False,
+                }
+            }
+        missing = sorted(
+            name for name, parameter in contract.items()
+            if parameter["required"] and name not in request
+        )
+        if missing:
+            return {
+                "error": {
+                    "code": "invalid_tool_arguments",
+                    "message": f"requests[{index}] is missing required model parameters: {', '.join(missing)}",
+                    "retryable": False,
+                }
+            }
+        for name in sorted(supplied):
+            parameter = contract[name]
+            value = request[name]
+            if not _parameter_value_matches_type(value, parameter["type"]):
+                return {
+                    "error": {
+                        "code": "invalid_tool_arguments",
+                        "message": (
+                            f"requests[{index}].{name} must have model-declared type "
+                            f"{parameter['type']}"
+                        ),
+                        "retryable": False,
+                    }
+                }
+            options = parameter["options"]
+            if options and value not in options and not (
+                name == "size"
+                and _arbitrary_image_size_is_valid(value, parameter["description"])
+            ):
+                return {
+                    "error": {
+                        "code": "invalid_tool_arguments",
+                        "message": (
+                            f"requests[{index}].{name} is not allowed by model {model!r}; "
+                            f"use one of {options}"
+                        ),
+                        "retryable": False,
+                    }
+                }
+    return None
 
 
 def _skill_scope_error(name: str) -> str:
@@ -1243,6 +1408,7 @@ class RuntimeBridgeSession:
         self.pending: dict[str, _PendingTool] = {}
         self.non_retryable_failures: dict[str, str] = {}
         self.argument_correction_failures: dict[str, int] = {}
+        self.model_parameter_contracts: dict[str, dict[str, dict[str, Any]]] = {}
         self.agent_ref: list[Any] = [None]
         self.lock = threading.RLock()
         self.interrupted = threading.Event()
@@ -1300,6 +1466,89 @@ class RuntimeBridgeSession:
             count=count,
             signature=ToolCallSignature.from_call(name, args),
         ))
+
+    def _ensure_model_parameter_contracts(
+        self,
+        tool_name: str,
+        args: Any,
+        parent_call_id: str,
+    ) -> dict[str, Any] | None:
+        if tool_name not in _MODEL_SCHEMA_GATED_MEDIA_TOOLS:
+            return None
+        requests = args.get("requests") if isinstance(args, dict) else None
+        if not isinstance(requests, list):
+            return None
+        models = sorted({
+            str(request.get("model") or "").strip()
+            for request in requests
+            if isinstance(request, dict) and str(request.get("model") or "").strip()
+        })
+        for model in models:
+            with self.lock:
+                if model in self.model_parameter_contracts:
+                    continue
+            if "media.model_catalog" not in self.tool_names:
+                return {
+                    "error": {
+                        "code": "model_schema_unavailable",
+                        "message": "Runtime was not granted media.model_catalog for exact model resolution",
+                        "retryable": False,
+                    }
+                }
+            digest = hashlib.sha256(
+                (parent_call_id + "\x00" + model).encode("utf-8")
+            ).hexdigest()
+            schema_call_id = f"schema_{digest}"
+            pending = _PendingTool(name="media.model_catalog")
+            with self.lock:
+                if schema_call_id in self.pending:
+                    return {
+                        "error": {
+                            "code": "idempotency_conflict",
+                            "message": "duplicate active model schema resolution",
+                            "retryable": False,
+                        }
+                    }
+                self.pending[schema_call_id] = pending
+            catalog_args = {"action": "get", "model_id": model}
+            self.emit("tool_request", {
+                "call_id": schema_call_id,
+                "name": "media.model_catalog",
+                "arguments": catalog_args,
+            })
+            wait_timeout = (
+                self.deadline_seconds
+                if self.deadline_seconds is not None
+                else _UNBOUNDED_TOOL_WAIT_CAP_SECONDS
+            )
+            ready = pending.ready.wait(wait_timeout)
+            if not ready or self.interrupted.is_set():
+                with self.lock:
+                    self.pending.pop(schema_call_id, None)
+                return {
+                    "error": {
+                        "code": "model_schema_unavailable",
+                        "message": f"Runtime could not resolve the exact contract for model {model!r}",
+                        "retryable": False,
+                    }
+                }
+            result = pending.result or {}
+            catalog_contract = (
+                _catalog_parameter_contract(result.get("result"))
+                if result.get("ok")
+                else None
+            )
+            if catalog_contract is None or catalog_contract[0] != model:
+                return {
+                    "error": {
+                        "code": "model_schema_unavailable",
+                        "message": f"Catalog did not return a usable exact contract for model {model!r}",
+                        "retryable": False,
+                    }
+                }
+            with self.lock:
+                self.model_parameter_contracts[model] = catalog_contract[1]
+        return None
 
     def emit(self, event_type: str, payload: dict[str, Any]) -> None:
         event = {"run_id": self.run_id, "type": event_type, "payload": payload}
@@ -1434,6 +1683,24 @@ class RuntimeBridgeSession:
                     "retryable": False,
                 },
             }, ensure_ascii=False, separators=(",", ":"))
+        schema_error = self._ensure_model_parameter_contracts(name, args, call_id)
+        if schema_error is not None:
+            return json.dumps(schema_error, ensure_ascii=False, separators=(",", ":"))
+        contract_error = _model_request_contract_error(
+            name,
+            args,
+            self.model_parameter_contracts,
+        )
+        if contract_error is not None:
+            error = contract_error.get("error")
+            if isinstance(error, dict) and error.get("code") == "invalid_tool_arguments":
+                error["recovery"] = {
+                    "action": "correct_arguments",
+                    "same_arguments_allowed": False,
+                }
+                with self.lock:
+                    self.non_retryable_failures[signature_key] = "invalid_tool_arguments"
+            return json.dumps(contract_error, ensure_ascii=False, separators=(",", ":"))
         pending = _PendingTool(name=name, signature_key=signature_key)
         with self.lock:
             if call_id in self.pending:
@@ -1460,6 +1727,15 @@ class RuntimeBridgeSession:
             return json.dumps({"error": {"code": code, "message": message, "retryable": False}})
         result = pending.result or {}
         if result.get("ok"):
+            if (
+                name == "media.model_catalog"
+                and str(args.get("action") or "").strip().lower() == "get"
+            ):
+                catalog_contract = _catalog_parameter_contract(result.get("result"))
+                requested_model = str(args.get("model_id") or args.get("model") or "").strip()
+                if catalog_contract is not None and catalog_contract[0] == requested_model:
+                    with self.lock:
+                        self.model_parameter_contracts[requested_model] = catalog_contract[1]
             with self.lock:
                 self.argument_correction_failures.pop(name, None)
             return json.dumps(result.get("result"), ensure_ascii=False, separators=(",", ":"))
