@@ -6,6 +6,7 @@ import base64
 import binascii
 import hashlib
 import json
+import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -17,11 +18,14 @@ from agent.skill_utils import parse_frontmatter
 _MAX_SKILL_FILE_BYTES = 8 << 20
 _MAX_SKILL_SNAPSHOT_BYTES = 32 << 20
 _HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class RuntimeSkillProjection:
     files: Mapping[str, bytes]
+    routing_mode: str
+    kind: str
 
 
 def projection_skill_metadata(
@@ -31,20 +35,21 @@ def projection_skill_metadata(
     result: list[dict[str, Any]] = []
     for name in sorted(projections):
         projection = projections[name]
+        if projection.routing_mode == "dependency_only":
+            continue
         try:
             content = projection.files["SKILL.md"].decode("utf-8")
-        except (KeyError, UnicodeDecodeError) as exc:
-            raise ValueError(
-                f"run-bound Skill metadata is unreadable for {name}"
-            ) from exc
-        frontmatter, _ = parse_frontmatter(content)
-        if not isinstance(frontmatter, dict):
-            raise ValueError(f"run-bound Skill metadata is invalid for {name}")
+            frontmatter, _ = parse_frontmatter(content)
+            if not isinstance(frontmatter, dict):
+                raise ValueError("frontmatter is not an object")
+        except (KeyError, UnicodeDecodeError, ValueError) as exc:
+            logger.warning("Isolating unreadable run-bound Skill metadata for %s: %s", name, exc)
+            continue
         description = frontmatter.get("description")
         if not isinstance(description, str):
             description = ""
         routing = frontmatter.get("routing")
-        kind = str(frontmatter.get("kind") or "").strip()
+        kind = projection.kind or str(frontmatter.get("kind") or "").strip()
         item: dict[str, Any] = {
             "name": name,
             "description": " ".join(description.split()),
@@ -78,11 +83,15 @@ def resolve_skill_projections(
         if not isinstance(skill, dict):
             raise ValueError("skill_manifest.skills must contain only objects")
         name = str(skill.get("runtime_alias") or "").strip()
+        routing_mode = str(skill.get("routing_mode") or "").strip()
+        kind = str(skill.get("kind") or "").strip()
         raw_files = skill.get("files")
         if not name or not isinstance(raw_files, list) or not raw_files:
             raise ValueError(f"skill_manifest files are required for {name or 'skill'}")
         if name in projections:
             raise ValueError(f"skill_manifest contains duplicate runtime_alias {name}")
+        if routing_mode not in {"primary", "domain", "dependency_only"}:
+            raise ValueError(f"skill_manifest routing_mode is invalid for {name}")
 
         files: dict[str, bytes] = {}
         for raw_file in raw_files:
@@ -95,7 +104,9 @@ def resolve_skill_projections(
             files[path] = body
         if "SKILL.md" not in files:
             raise ValueError(f"skill_manifest root file is required for {name}")
-        projections[name] = RuntimeSkillProjection(files=dict(files))
+        projections[name] = RuntimeSkillProjection(
+            files=dict(files), routing_mode=routing_mode, kind=kind
+        )
     return projections
 
 

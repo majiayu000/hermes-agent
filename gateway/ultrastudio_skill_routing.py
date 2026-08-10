@@ -131,7 +131,11 @@ def format_allowed_skills(
         item = available[name]
         description = " ".join(str(item.get("description") or "").split())
         if item.get("category") == "workflow-generation":
-            priority, triggers, negative = workflow_routing(item)
+            try:
+                priority, triggers, negative = workflow_routing(item)
+            except ValueError as error:
+                logger.warning("Isolating unroutable run-bound Skill %s: %s", name, error)
+                continue
             detail = (
                 f"priority={priority}; applies={'; '.join(triggers)}; "
                 f"not={'; '.join(negative)}"
@@ -141,5 +145,7 @@ def format_allowed_skills(
             detail = description
         line = f"- {name}: {detail}" if detail else f"- {name}"
         indexed.append((priority, name, line))
+    if not indexed:
+        return format_allowed_skills(set(), [])
     lines = [line for _, _, line in sorted(indexed, key=lambda row: (-row[0], row[1]))]
     return "\n\n<available_skills>\n" + "\n".join(lines) + "\n</available_skills>"
