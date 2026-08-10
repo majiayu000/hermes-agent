@@ -188,6 +188,19 @@ def test_tool_result_resume_does_not_append_synthetic_user_turn():
     assert sum(message["role"] == "user" for message in ctx.messages) == 1
 
 
+def test_same_turn_retry_reuses_user_tail_without_appending_user_turn():
+    agent = _FakeAgent()
+    agent._retry_current_turn = True
+    history = [{"role": "user", "content": "make an image"}]
+
+    ctx = _build(agent, user_message="", conversation_history=history)
+
+    assert ctx.messages == history
+    assert ctx.current_turn_user_idx == -1
+    assert ctx.original_user_message == ""
+    assert agent._user_turn_count == 1
+
+
 def test_applies_agent_side_effects():
     agent = _FakeAgent()
     _build(agent)

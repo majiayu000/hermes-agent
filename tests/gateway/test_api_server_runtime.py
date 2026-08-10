@@ -29,6 +29,7 @@ from gateway.api_server_runtime import (
     _pin_run_model,
     _replacement_system_prompt,
     _project_runtime_resume_attachments,
+    _retry_session_db_history,
     _resume_session_db_history,
     _runtime_attachment_parts,
     _runtime_attachment_reference_prompt,
@@ -1177,6 +1178,15 @@ def test_runtime_resume_rejects_more_than_one_unfinished_tool_call():
         )
 
 
+def test_runtime_same_turn_retry_requires_user_or_tool_tail():
+    history = [{"role": "user", "content": "make an image"}]
+    assert _retry_session_db_history(history) == history
+    with pytest.raises(RuntimeSessionStateError, match="must end with user or tool"):
+        _retry_session_db_history(
+            [*history, {"role": "assistant", "content": "finished"}],
+        )
+
+
 @pytest.mark.asyncio
 async def test_runtime_resume_wiring_reaches_agent_without_new_user_message():
     class ResumeAdapter(_TestRuntimeAdapter):
@@ -1822,7 +1832,7 @@ def _run_body(run_id: str, **extra):
             }
             for index, message in enumerate(body["messages"])
         ]
-    if body.get("intent") == "resume":
+    if body.get("intent") in {"resume", "retry"}:
         body["messages"] = []
     return body
 
@@ -1845,6 +1855,43 @@ def _complete_test_run(adapter, body):
             await client.close()
 
     return _run
+
+
+@pytest.mark.asyncio
+async def test_runtime_retry_continues_existing_turn_without_new_user_message():
+    class RetryAdapter(_TestRuntimeAdapter):
+        _api_key = ""
+
+        def __init__(self):
+            super().__init__()
+            self.db.create_session("thread_retry", "api_server")
+            self.db.append_message(
+                "thread_retry",
+                role="user",
+                content="make an image",
+                platform_message_id="user-retry",
+            )
+
+        def _check_auth(self, _request):
+            return None
+
+        async def _run_agent_bridge(self, **kwargs):
+            agent = SimpleNamespace(tools=[], valid_tool_names=set(), model="configured-model")
+            kwargs["agent_configurator"](agent)
+            assert agent._resume_from_tool_results is False
+            assert agent._retry_current_turn is True
+            assert kwargs["user_message"] == ""
+            assert [message["role"] for message in kwargs["conversation_history"]] == ["user"]
+            return {"final_response": "done"}, {"total_tokens": 2}
+
+    status, events = await _complete_test_run(RetryAdapter(), _run_body(
+        "retry",
+        intent="retry",
+        context={"session_id": "thread_retry"},
+        retry_context={"attempt": 2, "previous_error_code": "provider_timeout"},
+    ))()
+    assert status == 200
+    assert events[-1]["type"] == "completed"
 
 
 def test_runtime_message_validation_requires_stable_unique_ids_and_valid_roles():

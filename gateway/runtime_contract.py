@@ -20,6 +20,7 @@ RUNTIME_CAPABILITIES = (
     "delegated_tools",
     "interrupt",
     "session_db_resume",
+    "retry_current_turn/v1",
     "system_context.replace",
     "llm_egress",
 )

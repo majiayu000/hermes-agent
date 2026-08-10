@@ -43,6 +43,7 @@ from agent.tool_dispatch_helpers import DeferredToolResult
 from gateway.runtime_session_history import (
     RuntimeSessionStateError as _RuntimeSessionStateError,
     load_runtime_session_history as _load_runtime_session_history,
+    retry_session_db_history as _retry_session_db_history,
     resume_session_db_history as _resume_session_db_history,
     runtime_history_tool_names as _runtime_history_tool_names,
     seed_runtime_session as _seed_runtime_session,
@@ -1878,6 +1879,7 @@ class APIServerRuntimeMixin:
                 "run_state",
                 "deadline_ms",
                 "llm_egress",
+                "retry_context",
             }
             if set(body) - supported_fields:
                 raise ValueError("request contains unsupported fields")
@@ -1889,8 +1891,8 @@ class APIServerRuntimeMixin:
                 in {"1", "true", "yes", "on"},
             )
             intent = body.get("intent")
-            if not isinstance(intent, str) or intent not in {"bootstrap", "new_turn", "resume"}:
-                raise ValueError("intent must be bootstrap, new_turn, or resume")
+            if not isinstance(intent, str) or intent not in {"bootstrap", "new_turn", "resume", "retry"}:
+                raise ValueError("intent must be bootstrap, new_turn, resume, or retry")
             run_id = str(body.get("run_id") or "").strip()
             requested_model = str(body.get("model") or "").strip()
             if not requested_model:
@@ -1916,9 +1918,9 @@ class APIServerRuntimeMixin:
                 raise ValueError("deadline_ms must be a non-negative integer") from exc
             if deadline_ms < 0:
                 raise ValueError("deadline_ms must be a non-negative integer")
-            if intent == "resume":
+            if intent in {"resume", "retry"}:
                 if messages != []:
-                    raise ValueError("resume messages must be exactly empty")
+                    raise ValueError("resume and retry messages must be exactly empty")
             elif not isinstance(messages, list) or not messages:
                 raise ValueError("bootstrap and new_turn require messages")
             normalized_messages = _normalize_runtime_messages(messages)
@@ -1929,6 +1931,24 @@ class APIServerRuntimeMixin:
                     raise ValueError("new_turn accepts exactly one user message")
             if intent != "resume" and tool_results:
                 raise ValueError("tool_results are only accepted for resume")
+            retry_context = body.get("retry_context")
+            if intent == "retry":
+                if not isinstance(retry_context, dict) or set(retry_context) != {
+                    "attempt",
+                    "previous_error_code",
+                }:
+                    raise ValueError("retry requires attempt and previous_error_code")
+                if (
+                    isinstance(retry_context.get("attempt"), bool)
+                    or not isinstance(retry_context.get("attempt"), int)
+                    or retry_context["attempt"] < 2
+                ):
+                    raise ValueError("retry attempt must be an integer greater than one")
+                previous_error_code = retry_context.get("previous_error_code")
+                if not isinstance(previous_error_code, str) or not previous_error_code.strip():
+                    raise ValueError("retry previous_error_code is required")
+            elif retry_context is not None:
+                raise ValueError("retry_context is only accepted for retry")
             _validate_runtime_artifact_manifest(body.get("artifact_manifest"))
             # Expose the run id to the audit middleware: its completion line
             # is logged after this handler returns, so the audit trail can
@@ -1976,7 +1996,7 @@ class APIServerRuntimeMixin:
             )
             runtime_image_paths = _runtime_image_paths(attachment_parts)
             runtime_video_paths = _runtime_video_paths(attachment_parts)
-            if attachment_parts and intent != "resume":
+            if attachment_parts and intent not in {"resume", "retry"}:
                 last_user_index = len(normalized_messages) - 1
                 if normalized_messages[last_user_index].get("role") != "user":
                     raise ValueError("attachments require a user message")
@@ -2025,7 +2045,7 @@ class APIServerRuntimeMixin:
                         "Runtime message id already exists in SessionDB",
                         status=409,
                     )
-            else:
+            elif intent == "resume":
                 session_history = _resume_session_db_history(
                     db,
                     agent_session_id,
@@ -2036,9 +2056,11 @@ class APIServerRuntimeMixin:
                     session_history,
                     attachment_parts,
                 )
+            else:
+                session_history = _retry_session_db_history(session_history)
             history = session_history
             tool_exposure.activate_names(_runtime_history_tool_names(history))
-            if intent == "resume":
+            if intent in {"resume", "retry"}:
                 user_message = ""
                 runtime_user_message_id = None
             else:
@@ -2122,6 +2144,7 @@ class APIServerRuntimeMixin:
             agent._cached_system_prompt = instructions
             agent._build_system_prompt = lambda _system_message=None: instructions
             agent._resume_from_tool_results = intent == "resume"
+            agent._retry_current_turn = intent == "retry"
             agent._require_incremental_session_persistence = True
             # The Orchestrator already validated and materialized these image
             # assets. Its model catalog can lag newly deployed multimodal
