@@ -2033,101 +2033,6 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
 
 
 
-def repair_tool_call(agent, tool_name: str) -> str | None:
-    """Attempt to repair a mismatched tool name before aborting.
-
-    Models sometimes emit variants of a tool name that differ only
-    in casing, separators, or class-like suffixes. Normalize
-    aggressively before falling back to fuzzy match:
-
-    1. Lowercase direct match.
-    2. Lowercase + hyphens/spaces -> underscores.
-    3. CamelCase -> snake_case (TodoTool -> todo_tool).
-    4. Strip trailing ``_tool`` / ``-tool`` / ``tool`` suffix that
-       Claude-style models sometimes tack on (TodoTool_tool ->
-       TodoTool -> Todo -> todo). Applied twice so double-tacked
-       suffixes like ``TodoTool_tool`` reduce all the way.
-    5. Fuzzy match (difflib, cutoff=0.7).
-
-    See #14784 for the original reports (TodoTool_tool, Patch_tool,
-    BrowserClick_tool were all returning "Unknown tool" before).
-
-    Returns the repaired name if found in valid_tool_names, else None.
-    """
-    import re
-    from difflib import get_close_matches
-
-    if not tool_name:
-        return None
-
-    # VolcEngine api/plan workaround (issue #33007): the endpoint's
-    # protocol-translation layer occasionally leaks raw XML attribute
-    # fragments into tool_use.name, e.g.
-    #   `terminal" parameter="command" string="true`
-    #   `execute_code" parameter="code" string="true`
-    #   `session_search" parameter="session_id" string="true`
-    # We trim at the first unambiguous XML/quote character so the rest
-    # of the repair pipeline (lowercase / snake_case / fuzzy match)
-    # can resolve the cleaned name to a real tool.
-    #
-    # Crucially we DO NOT split on whitespace: legitimate inputs like
-    # "write file" must keep flowing through ``_norm`` -> ``write_file``
-    # (covered by test_space_to_underscore in
-    # tests/run_agent/test_repair_tool_call_name.py).
-    for _xml_sep in ('"', "'", "<", ">"):
-        _idx = tool_name.find(_xml_sep)
-        if _idx > 0:
-            tool_name = tool_name[:_idx]
-    if not tool_name:
-        return None
-
-    def _norm(s: str) -> str:
-        return s.lower().replace("-", "_").replace(" ", "_")
-
-    def _camel_snake(s: str) -> str:
-        return re.sub(r"(?<!^)(?=[A-Z])", "_", s).lower()
-
-    def _strip_tool_suffix(s: str) -> str | None:
-        lc = s.lower()
-        for suffix in ("_tool", "-tool", "tool"):
-            if lc.endswith(suffix):
-                return s[: -len(suffix)].rstrip("_-")
-        return None
-
-    # Cheap fast-paths first — these cover the common case.
-    lowered = tool_name.lower()
-    if lowered in agent.valid_tool_names:
-        return lowered
-    normalized = _norm(tool_name)
-    if normalized in agent.valid_tool_names:
-        return normalized
-
-    # Build the full candidate set for class-like emissions.
-    cands: set[str] = {tool_name, lowered, normalized, _camel_snake(tool_name)}
-    # Strip trailing tool-suffix up to twice — TodoTool_tool needs it.
-    for _ in range(2):
-        extra: set[str] = set()
-        for c in cands:
-            stripped = _strip_tool_suffix(c)
-            if stripped:
-                extra.add(stripped)
-                extra.add(_norm(stripped))
-                extra.add(_camel_snake(stripped))
-        cands |= extra
-
-    for c in cands:
-        if c and c in agent.valid_tool_names:
-            return c
-
-    # Fuzzy match as last resort.
-    matches = get_close_matches(lowered, agent.valid_tool_names, n=1, cutoff=0.7)
-    if matches:
-        return matches[0]
-
-    return None
-
-
-
 def sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Fix orphaned tool_call / tool_result pairs before every LLM call.
 
@@ -2802,7 +2707,6 @@ __all__ = [
     "create_openai_client",
     "switch_model",
     "invoke_tool",
-    "repair_tool_call",
     "sanitize_api_messages",
     "looks_like_codex_intermediate_ack",
     "copy_reasoning_content_for_api",

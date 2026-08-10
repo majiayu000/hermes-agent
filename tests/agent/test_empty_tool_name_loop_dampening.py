@@ -181,3 +181,23 @@ def test_unknown_nonempty_name_keeps_catalog(agent_env):
     assert "frobnicate_xyz" in joined
     assert "Available tools:" in joined
     assert "tool name was empty" not in joined
+
+
+def test_unknown_media_tool_is_not_rewritten_to_adjacent_capability(agent_env):
+    """An unavailable video tool must not execute the similarly named image tool."""
+    agent, handler = agent_env
+    agent.valid_tool_names = {"media.generate_image"}
+    handler.response_queue.append(
+        _tc_resp(
+            "media.generate_video",
+            '{"requests": [{"model": "test-video", "prompt": "test"}]}',
+        )
+    )
+    handler.response_queue.append(_text_resp("Video tool is unavailable."))
+
+    agent.run_conversation("generate a video", conversation_history=[], task_id="t")
+
+    joined = " ".join(_tool_results(handler))
+    assert "media.generate_video" in joined
+    assert "does not exist" in joined
+    assert "Available tools: media.generate_image" in joined
