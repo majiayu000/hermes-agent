@@ -195,6 +195,30 @@ def resume_session_db_history(
     return [*history, projected]
 
 
+def retry_session_db_history(
+    history: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Validate that SessionDB can continue the current logical turn.
+
+    Provider failures occur before a completed assistant message is committed,
+    so an eligible retry resumes from the existing user/tool tail without
+    inserting a synthetic user message.
+    """
+    if not history or not isinstance(history[-1], dict):
+        raise RuntimeSessionStateError(
+            "runtime_history_conflict",
+            "same-turn retry requires existing SessionDB history",
+            status=409,
+        )
+    if history[-1].get("role") not in {"user", "tool"}:
+        raise RuntimeSessionStateError(
+            "runtime_history_conflict",
+            "same-turn retry history must end with user or tool state",
+            status=409,
+        )
+    return list(history)
+
+
 def seed_runtime_session(
     db: Any,
     session_id: str,
@@ -322,6 +346,7 @@ def load_runtime_session_history(
 __all__ = [
     "RuntimeSessionStateError",
     "load_runtime_session_history",
+    "retry_session_db_history",
     "resume_session_db_history",
     "runtime_history_tool_names",
     "seed_runtime_session",
