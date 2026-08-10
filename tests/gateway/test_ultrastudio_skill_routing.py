@@ -146,15 +146,24 @@ def test_discovery_cache_invalidates_when_root_mtime_changes(skill_discovery):
     assert calls == {"find": 2, "parse": 2}
 
 
-def test_allowed_skill_index_fails_closed_for_missing_or_unroutable_workflow():
+def test_allowed_skill_index_rejects_missing_and_isolates_unroutable_workflow(caplog):
     with pytest.raises(ValueError, match="allowed skills unavailable: missing"):
         format_allowed_skills({"missing"}, [])
-    with pytest.raises(ValueError, match="no routing metadata"):
-        format_allowed_skills(
-            {"broken"},
-            [{
+    prompt = format_allowed_skills(
+        {"broken", "healthy"},
+        [
+            {
                 "name": "broken",
                 "description": "Broken.",
                 "category": "workflow-generation",
-            }],
-        )
+            },
+            {
+                "name": "healthy",
+                "description": "Healthy.",
+                "category": "method",
+            },
+        ],
+    )
+    assert "broken" not in prompt
+    assert "- healthy: Healthy." in prompt
+    assert "Isolating unroutable run-bound Skill broken" in caplog.text

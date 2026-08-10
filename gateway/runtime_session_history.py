@@ -195,6 +195,59 @@ def resume_session_db_history(
     return [*history, projected]
 
 
+def seed_recovery_tool_call(
+    db: Any,
+    session_id: str,
+    recovery_tool_calls: Any,
+    tool_results: Any,
+) -> None:
+    """Rebuild one already-executed assistant call without invoking its tool."""
+    if (
+        not isinstance(recovery_tool_calls, list)
+        or len(recovery_tool_calls) != 1
+        or not isinstance(recovery_tool_calls[0], dict)
+    ):
+        raise ValueError("rebootstrap requires exactly one recovery_tool_call")
+    call = recovery_tool_calls[0]
+    if set(call) != {"tool_call_id", "tool_name", "args"}:
+        raise ValueError("recovery_tool_call contains unsupported fields")
+    call_id = str(call.get("tool_call_id") or "").strip()
+    tool_name = str(call.get("tool_name") or "").strip()
+    args = call.get("args")
+    if not call_id or not tool_name or not isinstance(args, dict):
+        raise ValueError("recovery_tool_call identity and args are required")
+    if (
+        not isinstance(tool_results, list)
+        or len(tool_results) != 1
+        or str(tool_results[0].get("tool_call_id") or "").strip() != call_id
+    ):
+        raise ValueError("recovery_tool_call must match the durable tool_result")
+    try:
+        db.append_message(
+            session_id=session_id,
+            role="assistant",
+            content="",
+            tool_calls=[
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": json.dumps(
+                            args, ensure_ascii=False, separators=(",", ":")
+                        ),
+                    },
+                }
+            ],
+            finish_reason="tool_calls",
+        )
+    except Exception as exc:
+        raise RuntimeSessionStateError(
+            "runtime_session_unavailable",
+            "failed to persist recovered assistant tool call in SessionDB",
+        ) from exc
+
+
 def seed_runtime_session(
     db: Any,
     session_id: str,
@@ -323,6 +376,7 @@ __all__ = [
     "RuntimeSessionStateError",
     "load_runtime_session_history",
     "resume_session_db_history",
+    "seed_recovery_tool_call",
     "runtime_history_tool_names",
     "seed_runtime_session",
 ]

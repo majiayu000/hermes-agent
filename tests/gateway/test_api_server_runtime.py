@@ -872,6 +872,8 @@ planning instructions
                 "skills": [
                     {
                         "runtime_alias": "media-qa",
+                        "routing_mode": "primary",
+                        "kind": "method",
                         "content_digest": package_digest,
                         "path": "/orchestrator-only/media-qa",
                         "files": [
@@ -884,6 +886,8 @@ planning instructions
                     },
                     {
                         "runtime_alias": "planning-only",
+                        "routing_mode": "domain",
+                        "kind": "method",
                         "content_digest": "sha256:" + hashlib.sha256(b"planning bundle").hexdigest(),
                         "path": "/orchestrator-only/planning-only",
                         "files": [
@@ -1040,6 +1044,8 @@ def test_runtime_skill_projections_require_verified_inline_files():
     manifest = {
         "skills": [{
             "runtime_alias": "tool-guided",
+            "routing_mode": "primary",
+            "kind": "method",
             "content_digest": "sha256:" + "a" * 64,
             "path": "/orchestrator-only/tool-guided",
             "files": [_runtime_skill_file("SKILL.md", b"instructions")],
@@ -1090,6 +1096,8 @@ instructions
     manifest = {
         "skills": [{
             "runtime_alias": "storyboard-quick-preview",
+            "routing_mode": "primary",
+            "kind": "workflow",
             "content_digest": "sha256:" + hashlib.sha256(skill_body).hexdigest(),
             "files": [_runtime_skill_file("SKILL.md", skill_body)],
         }],
@@ -1105,10 +1113,66 @@ instructions
     assert "applies=storyboard quick preview" in prompt
 
 
+def test_dependency_only_and_malformed_skill_are_isolated_from_root_index(caplog):
+    root_body = b"""---
+name: root-flow
+kind: method
+description: Root workflow.
+---
+instructions
+"""
+    dependency_body = b"""---
+name: helper-method
+kind: method
+description: Internal helper.
+---
+instructions
+"""
+    manifest = {
+        "skills": [
+            {
+                "runtime_alias": "root-flow",
+                "routing_mode": "primary",
+                "kind": "method",
+                "content_digest": "sha256:" + hashlib.sha256(root_body).hexdigest(),
+                "files": [_runtime_skill_file("SKILL.md", root_body)],
+            },
+            {
+                "runtime_alias": "helper-method",
+                "routing_mode": "dependency_only",
+                "kind": "method",
+                "content_digest": "sha256:" + hashlib.sha256(dependency_body).hexdigest(),
+                "files": [_runtime_skill_file("SKILL.md", dependency_body)],
+            },
+            {
+                "runtime_alias": "broken-optional",
+                "routing_mode": "domain",
+                "kind": "method",
+                "content_digest": "sha256:" + hashlib.sha256(b"\xff").hexdigest(),
+                "files": [_runtime_skill_file("SKILL.md", b"\xff")],
+            },
+        ],
+    }
+    projections = _runtime_skill_projections(manifest)
+    metadata = runtime_module.projection_skill_metadata(projections)
+    prompt = _allowed_skills_prompt(
+        {str(item["name"]) for item in metadata},
+        metadata,
+    )
+
+    assert "- root-flow:" in prompt
+    assert "helper-method" not in prompt
+    assert "broken-optional" not in prompt
+    assert "helper-method" in projections
+    assert "Isolating unreadable run-bound Skill metadata" in caplog.text
+
+
 def test_bound_skill_view_rejects_traversal_and_binary_files(monkeypatch):
     manifest = {
         "skills": [{
             "runtime_alias": "tool-guided",
+            "routing_mode": "primary",
+            "kind": "method",
             "content_digest": "sha256:" + "a" * 64,
             "path": "/orchestrator-only/tool-guided",
             "files": [
@@ -2048,6 +2112,78 @@ async def test_runtime_new_turn_uses_only_current_id_and_rejects_missing_or_dupl
     )()
     assert status == 409
     assert payload["error"]["code"] == "runtime_message_id_conflict"
+
+
+@pytest.mark.asyncio
+async def test_runtime_rebootstrap_rebuilds_missing_new_turn_session():
+    class CaptureAdapter(_TestRuntimeAdapter):
+        def _check_auth(self, _request):
+            return None
+
+        async def _run_agent_bridge(self, **kwargs):
+            self.captured = kwargs
+            agent = SimpleNamespace(tools=[], valid_tool_names=set(), model="configured-model")
+            kwargs["agent_configurator"](agent)
+            return {"final_response": "done"}, {}
+
+    adapter = CaptureAdapter()
+    status, events = await _complete_test_run(adapter, _run_body(
+        "run_rebootstrap_new_turn",
+        intent="rebootstrap",
+        context={"session_id": "missing-new-turn"},
+        messages=[
+            {"id": "old-user", "role": "user", "content": "old"},
+            {"id": "old-assistant", "role": "assistant", "content": "answer"},
+            {"id": "current-user", "role": "user", "content": "continue"},
+        ],
+    ))()
+    assert status == 200
+    assert events[-1]["type"] == "completed"
+    assert [item["message_id"] for item in adapter.captured["conversation_history"]] == [
+        "old-user",
+        "old-assistant",
+    ]
+    assert adapter.captured["runtime_message_id"] == "current-user"
+
+
+@pytest.mark.asyncio
+async def test_runtime_rebootstrap_restores_tool_result_without_reexecution():
+    class CaptureAdapter(_TestRuntimeAdapter):
+        def _check_auth(self, _request):
+            return None
+
+        async def _run_agent_bridge(self, **kwargs):
+            self.captured = kwargs
+            agent = SimpleNamespace(tools=[], valid_tool_names=set(), model="configured-model")
+            kwargs["agent_configurator"](agent)
+            assert agent._resume_from_tool_results is True
+            return {"final_response": "done"}, {}
+
+    adapter = CaptureAdapter()
+    result = {
+        "tool_call_id": "call-media",
+        "status": "succeeded",
+        "output": {"asset_id": "asset-1"},
+    }
+    status, events = await _complete_test_run(adapter, _run_body(
+        "run_rebootstrap_resume",
+        intent="rebootstrap",
+        context={"session_id": "missing-resume"},
+        messages=[{"id": "current-user", "role": "user", "content": "create"}],
+        tool_results=[result],
+        recovery_tool_calls=[{
+            "tool_call_id": "call-media",
+            "tool_name": "media.generate_image",
+            "args": {"model": "openai/gpt-image-2/text-to-image", "prompt": "x"},
+        }],
+    ))()
+    assert status == 200
+    assert events[-1]["type"] == "completed"
+    history = adapter.captured["conversation_history"]
+    assert [item["role"] for item in history] == ["user", "assistant", "tool"]
+    assert history[-2]["tool_calls"][0]["id"] == "call-media"
+    assert history[-1]["tool_call_id"] == "call-media"
+    assert adapter.captured["runtime_message_id"] is None
 
 
 @pytest.mark.asyncio

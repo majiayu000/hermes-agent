@@ -45,6 +45,7 @@ from gateway.runtime_session_history import (
     RuntimeSessionStateError as _RuntimeSessionStateError,
     load_runtime_session_history as _load_runtime_session_history,
     resume_session_db_history as _resume_session_db_history,
+    seed_recovery_tool_call as _seed_recovery_tool_call,
     runtime_history_tool_names as _runtime_history_tool_names,
     seed_runtime_session as _seed_runtime_session,
 )
@@ -657,13 +658,18 @@ def _runtime_skill_projections(skill_manifest: Any) -> dict[str, RuntimeSkillPro
 
 def _allowed_skills_prompt(
     allowed_names: set[str],
-    projections: dict[str, RuntimeSkillProjection],
+    projections: dict[str, RuntimeSkillProjection] | list[dict[str, Any]],
 ) -> str:
     from gateway.ultrastudio_skill_routing import format_allowed_skills
 
+    metadata = (
+        projection_skill_metadata(projections)
+        if isinstance(projections, dict)
+        else projections
+    )
     return format_allowed_skills(
         allowed_names,
-        projection_skill_metadata(projections),
+        metadata,
     )
 
 
@@ -1880,6 +1886,7 @@ class APIServerRuntimeMixin:
                 "run_state",
                 "deadline_ms",
                 "llm_egress",
+                "recovery_tool_calls",
             }
             if set(body) - supported_fields:
                 raise ValueError("request contains unsupported fields")
@@ -1891,8 +1898,8 @@ class APIServerRuntimeMixin:
                 in {"1", "true", "yes", "on"},
             )
             intent = body.get("intent")
-            if not isinstance(intent, str) or intent not in {"bootstrap", "new_turn", "resume"}:
-                raise ValueError("intent must be bootstrap, new_turn, or resume")
+            if not isinstance(intent, str) or intent not in {"bootstrap", "new_turn", "resume", "rebootstrap"}:
+                raise ValueError("intent must be bootstrap, new_turn, resume, or rebootstrap")
             run_id = str(body.get("run_id") or "").strip()
             requested_model = str(body.get("model") or "").strip()
             if not requested_model:
@@ -1901,14 +1908,15 @@ class APIServerRuntimeMixin:
             system_context = body.get("system_context")
             definitions = body.get("tools", [])
             tool_results = body.get("tool_results", [])
+            recovery_tool_calls = body.get("recovery_tool_calls", [])
             context = body.get("context")
             if not isinstance(context, dict) or set(context) != {"session_id"}:
                 raise ValueError("context must contain only session_id")
             requested_agent_session_id = str(context.get("session_id") or "").strip()
             if not run_id or not requested_agent_session_id:
                 raise ValueError("run_id and context.session_id are required")
-            if not isinstance(definitions, list) or not isinstance(tool_results, list):
-                raise ValueError("tools and tool_results must be arrays")
+            if not isinstance(definitions, list) or not isinstance(tool_results, list) or not isinstance(recovery_tool_calls, list):
+                raise ValueError("tools, tool_results, and recovery_tool_calls must be arrays")
             raw_deadline_ms = body.get("deadline_ms", 0)
             if isinstance(raw_deadline_ms, bool):
                 raise ValueError("deadline_ms must be a non-negative integer")
@@ -1924,13 +1932,17 @@ class APIServerRuntimeMixin:
             elif not isinstance(messages, list) or not messages:
                 raise ValueError("bootstrap and new_turn require messages")
             normalized_messages = _normalize_runtime_messages(messages)
-            if intent == "bootstrap" and normalized_messages[-1]["role"] != "user":
+            if intent in {"bootstrap", "rebootstrap"} and normalized_messages[-1]["role"] != "user":
                 raise ValueError("bootstrap messages must end with a user message")
             if intent == "new_turn":
                 if len(normalized_messages) != 1 or normalized_messages[0]["role"] != "user":
                     raise ValueError("new_turn accepts exactly one user message")
-            if intent != "resume" and tool_results:
-                raise ValueError("tool_results are only accepted for resume")
+            if intent not in {"resume", "rebootstrap"} and tool_results:
+                raise ValueError("tool_results are only accepted for resume or rebootstrap")
+            if intent != "rebootstrap" and recovery_tool_calls:
+                raise ValueError("recovery_tool_calls are only accepted for rebootstrap")
+            if intent == "rebootstrap" and bool(tool_results) != bool(recovery_tool_calls):
+                raise ValueError("rebootstrap recovery calls and results must be provided together")
             _validate_runtime_artifact_manifest(body.get("artifact_manifest"))
             # Expose the run id to the audit middleware: its completion line
             # is logged after this handler returns, so the audit trail can
@@ -1946,11 +1958,17 @@ class APIServerRuntimeMixin:
             )
             allowed_skill_names = set(allowed_skill_digests)
             allowed_skill_projections = _runtime_skill_projections(skill_manifest)
+            routing_metadata = projection_skill_metadata(allowed_skill_projections)
+            selectable_skill_names = {
+                str(item.get("name") or "").strip()
+                for item in routing_metadata
+                if isinstance(item, dict) and str(item.get("name") or "").strip()
+            }
             instructions = (
                 _replacement_system_prompt(system_context)
                 + _allowed_skills_prompt(
-                    allowed_skill_names,
-                    allowed_skill_projections,
+                    selectable_skill_names,
+                    routing_metadata,
                 )
                 + _run_state_prompt(body.get("run_state"))
                 + _runtime_verified_activity_prompt(
@@ -1981,7 +1999,7 @@ class APIServerRuntimeMixin:
             )
             runtime_image_paths = _runtime_image_paths(attachment_parts)
             runtime_video_paths = _runtime_video_paths(attachment_parts)
-            if attachment_parts and intent != "resume":
+            if attachment_parts and intent not in {"resume", "rebootstrap"}:
                 last_user_index = len(normalized_messages) - 1
                 if normalized_messages[last_user_index].get("role") != "user":
                     raise ValueError("attachments require a user message")
@@ -1993,9 +2011,9 @@ class APIServerRuntimeMixin:
             db, agent_session_id, session_history = _load_runtime_session_history(
                 self,
                 requested_agent_session_id,
-                require_existing=intent != "bootstrap",
+                require_existing=intent in {"new_turn", "resume"},
             )
-            if intent == "bootstrap":
+            if intent in {"bootstrap", "rebootstrap"}:
                 if db.get_session(requested_agent_session_id) is not None:
                     raise _RuntimeSessionStateError(
                         "runtime_session_conflict",
@@ -2007,13 +2025,35 @@ class APIServerRuntimeMixin:
                     requested_agent_session_id,
                     model=requested_model,
                     system_prompt=instructions,
-                    messages=normalized_messages[:-1],
+                    messages=(
+                        normalized_messages
+                        if intent == "rebootstrap" and tool_results
+                        else normalized_messages[:-1]
+                    ),
                 )
+                if intent == "rebootstrap" and tool_results:
+                    _seed_recovery_tool_call(
+                        db,
+                        requested_agent_session_id,
+                        recovery_tool_calls,
+                        tool_results,
+                    )
                 db, agent_session_id, session_history = _load_runtime_session_history(
                     self,
                     requested_agent_session_id,
                     require_existing=True,
                 )
+                if intent == "rebootstrap" and tool_results:
+                    session_history = _resume_session_db_history(
+                        db,
+                        agent_session_id,
+                        session_history,
+                        tool_results,
+                    )
+                    session_history = _project_runtime_resume_attachments(
+                        session_history,
+                        attachment_parts,
+                    )
             elif intent == "new_turn":
                 current_id = normalized_messages[0]["message_id"]
                 history_ids = {
@@ -2043,7 +2083,7 @@ class APIServerRuntimeMixin:
                 )
             history = session_history
             tool_exposure.activate_names(_runtime_history_tool_names(history))
-            if intent == "resume":
+            if intent == "resume" or (intent == "rebootstrap" and tool_results):
                 user_message = ""
                 runtime_user_message_id = None
             else:
@@ -2126,7 +2166,9 @@ class APIServerRuntimeMixin:
             agent.ephemeral_system_prompt = None
             agent._cached_system_prompt = instructions
             agent._build_system_prompt = lambda _system_message=None: instructions
-            agent._resume_from_tool_results = intent == "resume"
+            agent._resume_from_tool_results = intent == "resume" or (
+                intent == "rebootstrap" and bool(tool_results)
+            )
             agent._require_incremental_session_persistence = True
             # The Orchestrator already validated and materialized these image
             # assets. Its model catalog can lag newly deployed multimodal
