@@ -4071,14 +4071,9 @@ def run_conversation(
                     for tc in assistant_message.tool_calls:
                         logging.debug(f"Tool call: {tc.function.name} with args: {tc.function.arguments[:200]}...")
                 
-                # Validate tool call names - detect model hallucinations
-                # Repair mismatched tool names before validating
-                for tc in assistant_message.tool_calls:
-                    if tc.function.name not in agent.valid_tool_names:
-                        repaired = agent._repair_tool_call(tc.function.name)
-                        if repaired:
-                            print(f"{agent.log_prefix}🔧 Auto-repaired tool name: '{tc.function.name}' -> '{repaired}'")
-                            tc.function.name = repaired
+                # Validate tool call names exactly. An unavailable or misspelled
+                # tool must be reported to the model, never rewritten to a
+                # different executable capability.
                 invalid_tool_calls = [
                     tc.function.name for tc in assistant_message.tool_calls
                     if tc.function.name not in agent.valid_tool_names
