@@ -178,6 +178,25 @@ def _runtime_llm_egress(value: Any, *, required: bool) -> dict[str, str] | None:
     return {"base_url": base_url, "grant": grant, "expires_at": expires_at}
 
 
+def _runtime_vision_llm_egress(value: Any) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {
+        "model", "base_url", "grant", "expires_at",
+    }:
+        raise ValueError(
+            "vision_llm_egress must contain model, base_url, grant, and expires_at"
+        )
+    model = str(value.get("model") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,511}", model):
+        raise ValueError("vision_llm_egress.model is invalid")
+    capability = _runtime_llm_egress(
+        {key: value[key] for key in ("base_url", "grant", "expires_at")},
+        required=True,
+    )
+    return {"model": model, **capability}
+
+
 def _configure_run_llm_egress(agent: Any, capability: dict[str, str] | None, model: Any) -> None:
     if capability is None:
         return
@@ -323,40 +342,6 @@ def _pin_run_model(agent: Any, requested_model: Any) -> str:
 def _activity_arguments(tool_name: str, args: Any) -> dict[str, str]:
     if not isinstance(args, dict):
         return {}
-    if tool_name == "image_analyze":
-        sources = [source for source in _image_analysis_sources(args) if source]
-        if not sources:
-            return {}
-        source_kinds: set[str] = set()
-        output_refs: list[str] = []
-        for source in sources:
-            parsed = urlparse(source)
-            if (
-                parsed.scheme == ""
-                and source.startswith("output_")
-                and len(source) <= 256
-                and all(character.isalnum() or character in {"_", "-"} for character in source)
-            ):
-                source_kinds.add("run_output")
-                output_refs.append(source)
-            elif parsed.scheme.lower() in {"http", "https"}:
-                source_kinds.add("remote_url")
-            else:
-                # Local attachment paths are private capabilities. Report only
-                # their type; never project the path into Runtime activity or
-                # the browser event stream.
-                source_kinds.add("run_attachment")
-        projected = {
-            "source_count": str(len(sources)),
-            "source_kind": (
-                next(iter(source_kinds))
-                if len(source_kinds) == 1
-                else "mixed"
-            ),
-        }
-        if len(output_refs) == 1 and len(sources) == 1:
-            projected["output_ref"] = output_refs[0]
-        return projected
     allowed = {
         "skill_view": ("name", "file_path"),
         "tool_search": ("query",),
@@ -1379,6 +1364,11 @@ def _runtime_tool_middleware(**kwargs: Any) -> Any:
     if tool_name in _RUNTIME_NATIVE_TOOLS:
         return next_call(args) if callable(next_call) else args
 
+    # Runtime Runs are capability-scoped by the Orchestrator.  A late MCP
+    # refresh, plugin hook, or registry mutation must never widen that scope
+    # with process-global Hermes tools.  Fail closed even if such a tool was
+    # accidentally advertised to the model, and halt the turn so it cannot
+    # retry or pivot through another unscoped local execution surface.
     session._halt_tool_loop(
         tool_name,
         args,
@@ -1659,11 +1649,14 @@ class RuntimeBridgeSession:
             if call_id in self.local_activities:
                 return
             self.local_activities[call_id] = name
-        self.emit("activity_started", {
+        payload: dict[str, Any] = {
             "call_id": call_id,
             "name": name,
-            "arguments": _activity_arguments(name, args),
-        })
+        }
+        arguments = _activity_arguments(name, args)
+        if name in {"skill_view", "tool_search"}:
+            payload["arguments"] = arguments
+        self.emit("activity_started", payload)
 
     def complete_local_activity(self, call_id: str, name: str, args: Any, result: Any) -> None:
         if not call_id:
@@ -1966,17 +1959,28 @@ class APIServerRuntimeMixin:
                 "run_state",
                 "deadline_ms",
                 "llm_egress",
+                "vision_llm_egress",
                 "retry_context",
             }
             if set(body) - supported_fields:
                 raise ValueError("request contains unsupported fields")
+            require_llm_egress = (
+                os.environ.get("HERMES_RUNTIME_REQUIRE_LLM_EGRESS", "")
+                .strip()
+                .lower()
+                in {"1", "true", "yes", "on"}
+            )
             llm_egress = _runtime_llm_egress(
                 body.get("llm_egress"),
-                required=os.environ.get(
-                    "HERMES_RUNTIME_REQUIRE_LLM_EGRESS", ""
-                ).strip().lower()
-                in {"1", "true", "yes", "on"},
+                required=require_llm_egress,
             )
+            vision_llm_egress = _runtime_vision_llm_egress(
+                body.get("vision_llm_egress")
+            )
+            if require_llm_egress and vision_llm_egress is None:
+                raise ValueError(
+                    "vision_llm_egress must contain model, base_url, grant, and expires_at"
+                )
             intent = body.get("intent")
             if not isinstance(intent, str) or intent not in {"bootstrap", "new_turn", "resume", "retry"}:
                 raise ValueError("intent must be bootstrap, new_turn, resume, or retry")
@@ -2229,6 +2233,16 @@ class APIServerRuntimeMixin:
             agent._session_db_created = True
             agent.session_id = agent_session_id
             _configure_run_llm_egress(agent, llm_egress, body.get("model"))
+            if vision_llm_egress is not None:
+                from agent.auxiliary_client import set_runtime_auxiliary_override
+
+                set_runtime_auxiliary_override(
+                    "vision",
+                    provider="custom",
+                    model=vision_llm_egress["model"],
+                    base_url=vision_llm_egress["base_url"],
+                    api_key=vision_llm_egress["grant"],
+                )
             _pin_run_model(agent, body.get("model"))
             # The Orchestrator owns the complete per-Run Tool grant. Hermes'
             # ordinary between-turn MCP refresh rebuilds from a process-global

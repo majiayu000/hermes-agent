@@ -683,22 +683,38 @@ def test_runtime_tool_middleware_fails_closed_for_process_global_tools():
         session.loop.close()
 
 
-def test_image_analyze_activity_arguments_expose_typed_refs_without_private_paths():
+def test_private_runtime_activity_arguments_are_never_exposed():
     assert runtime_module._activity_arguments("image_analyze", {
         "image_url": "output_board_123",
         "question": "check the layout",
-    }) == {
-        "source_count": "1",
-        "source_kind": "run_output",
-        "output_ref": "output_board_123",
-    }
-    assert runtime_module._activity_arguments("image_analyze", {
-        "image_paths": ["/private/runtime/output.png", "https://example.com/reference.png"],
-        "question": "compare",
-    }) == {
-        "source_count": "2",
-        "source_kind": "mixed",
-    }
+    }) == {}
+
+
+def test_private_runtime_activity_event_omits_arguments():
+    loop = asyncio.new_event_loop()
+    queue = asyncio.Queue()
+    session = RuntimeBridgeSession(
+        "run_activity",
+        loop,
+        queue,
+        [],
+        1_000,
+        "agent_activity",
+    )
+    emitted = []
+    session.emit = lambda event_type, payload: emitted.append((event_type, payload))
+    try:
+        session.start_local_activity(
+            "call_image_analyze",
+            "image_analyze",
+            {"image_url": "output_board_123", "question": "check the layout"},
+        )
+        assert emitted == [(
+            "activity_started",
+            {"call_id": "call_image_analyze", "name": "image_analyze"},
+        )]
+    finally:
+        loop.close()
 
 
 @pytest.mark.asyncio
