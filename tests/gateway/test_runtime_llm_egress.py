@@ -8,6 +8,7 @@ from gateway.api_server_runtime import (
     _configure_run_llm_egress,
     _runtime_failure_code,
     _runtime_llm_egress,
+    _runtime_vision_llm_egress,
 )
 from gateway.runtime_contract import RUNTIME_CAPABILITIES, runtime_error_envelope
 
@@ -38,6 +39,16 @@ def test_runtime_llm_egress_validates_private_capability():
         )
 
 
+def test_runtime_vision_llm_egress_requires_a_fixed_model():
+    value = capability(model="google/gemini-3.1-flash-lite")
+    assert _runtime_vision_llm_egress(value) == value
+    assert _runtime_vision_llm_egress(None) is None
+    with pytest.raises(ValueError, match="must contain"):
+        _runtime_vision_llm_egress(capability())
+    with pytest.raises(ValueError, match="model is invalid"):
+        _runtime_vision_llm_egress(capability(model="bad model"))
+
+
 def test_configure_run_llm_egress_rebuilds_run_scoped_client():
     value = capability()
     agent = SimpleNamespace(
@@ -55,6 +66,7 @@ def test_configure_run_llm_egress_rebuilds_run_scoped_client():
 
 def test_runtime_contract_and_billing_failure_are_account_aware():
     assert "llm_egress" in RUNTIME_CAPABILITIES
+    assert "vision_llm_egress" in RUNTIME_CAPABILITIES
     assert _runtime_failure_code({"error": 'HTTP 402: {"msg":"insufficient balance"}'}) == "insufficient_credits"
     envelope = runtime_error_envelope("insufficient_credits", support_id="run_1")
     assert envelope["code"] == "insufficient_credits"

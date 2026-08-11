@@ -41,6 +41,7 @@ Payment / credit exhaustion fallback:
 """
 
 import contextlib
+from contextvars import ContextVar
 import json
 import logging
 import os
@@ -1905,6 +1906,10 @@ _RUNTIME_MAIN_MODEL: str = ""
 _RUNTIME_MAIN_BASE_URL: str = ""
 _RUNTIME_MAIN_API_KEY: str = ""
 _RUNTIME_MAIN_API_MODE: str = ""
+_RUNTIME_AUXILIARY_OVERRIDES: ContextVar[Dict[str, Dict[str, str]]] = ContextVar(
+    "runtime_auxiliary_overrides",
+    default={},
+)
 
 
 def set_runtime_main(
@@ -1944,6 +1949,36 @@ def clear_runtime_main() -> None:
     _RUNTIME_MAIN_BASE_URL = ""
     _RUNTIME_MAIN_API_KEY = ""
     _RUNTIME_MAIN_API_MODE = ""
+
+
+def set_runtime_auxiliary_override(
+    task: str,
+    *,
+    provider: str,
+    model: str,
+    base_url: str,
+    api_key: str,
+    api_mode: str = "chat_completions",
+) -> None:
+    """Bind a private per-run auxiliary client in the current execution context."""
+    task = (task or "").strip()
+    values = {
+        "provider": (provider or "").strip(),
+        "model": (model or "").strip(),
+        "base_url": (base_url or "").strip(),
+        "api_key": api_key.strip() if isinstance(api_key, str) else "",
+        "api_mode": (api_mode or "").strip(),
+    }
+    if not task or any(not values[key] for key in ("provider", "model", "base_url", "api_key")):
+        raise ValueError("runtime auxiliary override is incomplete")
+    overrides = dict(_RUNTIME_AUXILIARY_OVERRIDES.get())
+    overrides[task] = values
+    _RUNTIME_AUXILIARY_OVERRIDES.set(overrides)
+
+
+def clear_runtime_auxiliary_overrides() -> None:
+    """Drop run-scoped auxiliary credentials before a worker context is reused."""
+    _RUNTIME_AUXILIARY_OVERRIDES.set({})
 
 
 def _resolve_custom_runtime() -> Tuple[Optional[str], Optional[str], Optional[str]]:
@@ -5204,6 +5239,16 @@ def _resolve_task_provider_model(
     to "custom" and the task uses that direct endpoint. api_mode is one of
     "chat_completions", "codex_responses", or None (auto-detect).
     """
+    runtime_override = _RUNTIME_AUXILIARY_OVERRIDES.get().get(task or "")
+    if runtime_override:
+        return (
+            runtime_override["provider"],
+            runtime_override["model"],
+            runtime_override["base_url"],
+            runtime_override["api_key"],
+            runtime_override["api_mode"],
+        )
+
     cfg_provider = None
     cfg_model = None
     cfg_base_url = None

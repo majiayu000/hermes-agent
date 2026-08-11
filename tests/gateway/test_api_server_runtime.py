@@ -257,6 +257,7 @@ class _RuntimeAdapter(_TestRuntimeAdapter):
         assert agent._primary_runtime["compressor_model"] == "chat-test"
         assert agent._fallback_chain == []
         assert agent._fallback_model is None
+        assert agent._skip_mcp_refresh is True
         assert agent.valid_tool_names == {
             "ask_user_question",
             "image_analyze",
@@ -636,6 +637,84 @@ def test_runtime_image_tool_allows_remote_and_scopes_local_sources(tmp_path):
     finally:
         runtime_module._SESSIONS.pop("agent_image", None)
         session.loop.close()
+
+
+def test_runtime_tool_middleware_fails_closed_for_process_global_tools():
+    queue = asyncio.Queue()
+    session = RuntimeBridgeSession(
+        "run_scoped",
+        asyncio.new_event_loop(),
+        queue,
+        [],
+        1_000,
+        "agent_scoped",
+    )
+    halt_decisions = []
+    session.agent_ref[0] = SimpleNamespace(
+        _set_tool_guardrail_halt=halt_decisions.append,
+    )
+    runtime_module._SESSIONS["agent_scoped"] = session
+    try:
+        denied = _runtime_tool_middleware(
+            tool_name="mcp_higgsfield_media_upload",
+            args={"filename": "reference.png"},
+            session_id="agent_scoped",
+            tool_call_id="unscoped_tool",
+            next_call=lambda _args: pytest.fail(
+                "process-global MCP tool escaped the Runtime scope"
+            ),
+        )
+
+        assert json.loads(denied) == {
+            "error": {
+                "code": "tool_not_allowed",
+                "message": (
+                    "Tool 'mcp_higgsfield_media_upload' is not authorized "
+                    "for this Runtime Run."
+                ),
+                "retryable": False,
+            },
+        }
+        assert len(halt_decisions) == 1
+        assert halt_decisions[0].should_halt is True
+        assert halt_decisions[0].code == "runtime_tool_scope_violation"
+    finally:
+        runtime_module._SESSIONS.pop("agent_scoped", None)
+        session.loop.close()
+
+
+def test_private_runtime_activity_arguments_are_never_exposed():
+    assert runtime_module._activity_arguments("image_analyze", {
+        "image_url": "output_board_123",
+        "question": "check the layout",
+    }) == {}
+
+
+def test_private_runtime_activity_event_omits_arguments():
+    loop = asyncio.new_event_loop()
+    queue = asyncio.Queue()
+    session = RuntimeBridgeSession(
+        "run_activity",
+        loop,
+        queue,
+        [],
+        1_000,
+        "agent_activity",
+    )
+    emitted = []
+    session.emit = lambda event_type, payload: emitted.append((event_type, payload))
+    try:
+        session.start_local_activity(
+            "call_image_analyze",
+            "image_analyze",
+            {"image_url": "output_board_123", "question": "check the layout"},
+        )
+        assert emitted == [(
+            "activity_started",
+            {"call_id": "call_image_analyze", "name": "image_analyze"},
+        )]
+    finally:
+        loop.close()
 
 
 @pytest.mark.asyncio

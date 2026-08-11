@@ -23,6 +23,7 @@ RUNTIME_CAPABILITIES = (
     "retry_current_turn/v1",
     "system_context.replace",
     "llm_egress",
+    "vision_llm_egress",
 )
 
 _SAFE_ERROR_MESSAGES = {

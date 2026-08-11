@@ -62,6 +62,13 @@ _LOCAL_ACTIVITY_TOOLS = {
     "web_search",
     "web_extract",
 }
+_RUNTIME_NATIVE_TOOLS = frozenset({
+    "skill_view",
+    "image_analyze",
+    "video_analyze",
+    "web_search",
+    "web_extract",
+})
 _MAX_ARGUMENT_CORRECTIONS = 1
 _MODEL_SCHEMA_GATED_MEDIA_TOOLS = frozenset({
     "media.estimate_cost",
@@ -169,6 +176,25 @@ def _runtime_llm_egress(value: Any, *, required: bool) -> dict[str, str] | None:
     if expiry.tzinfo is None or expiry.astimezone(timezone.utc) <= datetime.now(timezone.utc):
         raise ValueError("llm_egress grant is expired")
     return {"base_url": base_url, "grant": grant, "expires_at": expires_at}
+
+
+def _runtime_vision_llm_egress(value: Any) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {
+        "model", "base_url", "grant", "expires_at",
+    }:
+        raise ValueError(
+            "vision_llm_egress must contain model, base_url, grant, and expires_at"
+        )
+    model = str(value.get("model") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,511}", model):
+        raise ValueError("vision_llm_egress.model is invalid")
+    capability = _runtime_llm_egress(
+        {key: value[key] for key in ("base_url", "grant", "expires_at")},
+        required=True,
+    )
+    return {"model": model, **capability}
 
 
 def _configure_run_llm_egress(agent: Any, capability: dict[str, str] | None, model: Any) -> None:
@@ -1331,7 +1357,28 @@ def _runtime_tool_middleware(**kwargs: Any) -> Any:
                 "success": False,
                 "error": "video_analyze may only read video attachments owned by this run.",
             })
-    return next_call(args) if callable(next_call) else args
+    if tool_name in _RUNTIME_NATIVE_TOOLS:
+        return next_call(args) if callable(next_call) else args
+
+    # Runtime Runs are capability-scoped by the Orchestrator.  A late MCP
+    # refresh, plugin hook, or registry mutation must never widen that scope
+    # with process-global Hermes tools.  Fail closed even if such a tool was
+    # accidentally advertised to the model, and halt the turn so it cannot
+    # retry or pivot through another unscoped local execution surface.
+    session._halt_tool_loop(
+        tool_name,
+        args,
+        "runtime_tool_scope_violation",
+        f"Tool '{tool_name}' is not authorized for this Runtime Run.",
+        1,
+    )
+    return json.dumps({
+        "error": {
+            "code": "tool_not_allowed",
+            "message": f"Tool '{tool_name}' is not authorized for this Runtime Run.",
+            "retryable": False,
+        },
+    }, ensure_ascii=False, separators=(",", ":"))
 
 
 def _image_analysis_sources(args: dict[str, Any]) -> list[str]:
@@ -1598,11 +1645,14 @@ class RuntimeBridgeSession:
             if call_id in self.local_activities:
                 return
             self.local_activities[call_id] = name
-        self.emit("activity_started", {
+        payload: dict[str, Any] = {
             "call_id": call_id,
             "name": name,
-            "arguments": _activity_arguments(name, args),
-        })
+        }
+        arguments = _activity_arguments(name, args)
+        if name in {"skill_view", "tool_search"}:
+            payload["arguments"] = arguments
+        self.emit("activity_started", payload)
 
     def complete_local_activity(self, call_id: str, name: str, args: Any, result: Any) -> None:
         if not call_id:
@@ -1902,17 +1952,28 @@ class APIServerRuntimeMixin:
                 "run_state",
                 "deadline_ms",
                 "llm_egress",
+                "vision_llm_egress",
                 "retry_context",
             }
             if set(body) - supported_fields:
                 raise ValueError("request contains unsupported fields")
+            require_llm_egress = (
+                os.environ.get("HERMES_RUNTIME_REQUIRE_LLM_EGRESS", "")
+                .strip()
+                .lower()
+                in {"1", "true", "yes", "on"}
+            )
             llm_egress = _runtime_llm_egress(
                 body.get("llm_egress"),
-                required=os.environ.get(
-                    "HERMES_RUNTIME_REQUIRE_LLM_EGRESS", ""
-                ).strip().lower()
-                in {"1", "true", "yes", "on"},
+                required=require_llm_egress,
             )
+            vision_llm_egress = _runtime_vision_llm_egress(
+                body.get("vision_llm_egress")
+            )
+            if require_llm_egress and vision_llm_egress is None:
+                raise ValueError(
+                    "vision_llm_egress must contain model, base_url, grant, and expires_at"
+                )
             intent = body.get("intent")
             if not isinstance(intent, str) or intent not in {"bootstrap", "new_turn", "resume", "retry"}:
                 raise ValueError("intent must be bootstrap, new_turn, resume, or retry")
@@ -2162,7 +2223,22 @@ class APIServerRuntimeMixin:
             agent._session_db_created = True
             agent.session_id = agent_session_id
             _configure_run_llm_egress(agent, llm_egress, body.get("model"))
+            if vision_llm_egress is not None:
+                from agent.auxiliary_client import set_runtime_auxiliary_override
+
+                set_runtime_auxiliary_override(
+                    "vision",
+                    provider="custom",
+                    model=vision_llm_egress["model"],
+                    base_url=vision_llm_egress["base_url"],
+                    api_key=vision_llm_egress["grant"],
+                )
             _pin_run_model(agent, body.get("model"))
+            # The Orchestrator owns the complete per-Run Tool grant.  Hermes'
+            # ordinary between-turn MCP refresh rebuilds tools from the
+            # process-global registry and would otherwise reintroduce local
+            # MCP tools after this scoped snapshot has been installed.
+            agent._skip_mcp_refresh = True
             agent.ephemeral_system_prompt = None
             agent._cached_system_prompt = instructions
             agent._build_system_prompt = lambda _system_message=None: instructions

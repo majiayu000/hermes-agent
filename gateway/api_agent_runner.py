@@ -178,6 +178,9 @@ def run_agent_sync(
                 issue_or_refresh_sandbox_lease(db, effective_session_id, scope)
         return result, usage
     finally:
+        from agent.auxiliary_client import clear_runtime_auxiliary_overrides
+
+        clear_runtime_auxiliary_overrides()
         if prompt_callbacks_enabled:
             from tools.clarify_gateway import clear_session
             from tools.terminal_tool import set_sudo_password_callback
