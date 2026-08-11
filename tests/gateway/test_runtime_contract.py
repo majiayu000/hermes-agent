@@ -37,3 +37,11 @@ def test_runtime_unavailable_is_safe_and_retryable():
     error = runtime_error_envelope("runtime_unavailable", support_id="run_2")
     assert error["message"] == "The creation service is temporarily unavailable."
     assert error["retryable"] is True
+
+
+def test_model_incompatible_is_safe_and_not_retryable():
+    error = runtime_error_envelope("model_incompatible", support_id="run-model")
+    assert error["message"] == (
+        "The selected model could not accept the generated result."
+    )
+    assert error["retryable"] is False

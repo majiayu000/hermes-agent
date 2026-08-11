@@ -110,7 +110,7 @@ class TestStripImagePartsHelper:
         ]
         assert agent._try_strip_image_parts_from_tool_messages(msgs) is True
         assert isinstance(msgs[0]["content"], str)
-        assert "image content removed" in msgs[0]["content"]
+        assert "image content omitted" in msgs[0]["content"]
 
     def test_records_provider_model_in_session_cache(self):
         agent = _make_agent(provider="xiaomi", model="mimo-v2.5")
