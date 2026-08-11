@@ -2,9 +2,8 @@
 
 The runtime whitelists five native tools; before this coverage the web pair
 ran with zero observability. Activities must emit started/completed events
-with empty arguments (queries and URLs stay private, matching the
-image_analyze / video_analyze contract enforced by the Orchestrator's
-runtime policy).
+with empty arguments so queries and URLs stay private. Media activities are
+stricter and omit the arguments field entirely; keep the distinction explicit.
 """
 
 from __future__ import annotations

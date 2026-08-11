@@ -1654,7 +1654,7 @@ class RuntimeBridgeSession:
             "name": name,
         }
         arguments = _activity_arguments(name, args)
-        if name in {"skill_view", "tool_search"}:
+        if name not in {"image_analyze", "video_analyze"}:
             payload["arguments"] = arguments
         self.emit("activity_started", payload)
 
