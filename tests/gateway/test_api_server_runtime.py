@@ -706,7 +706,14 @@ async def test_runtime_bridge_delivers_image_attachment_as_multimodal_user_conte
                 _fallback_activated=False,
             )
             kwargs["agent_configurator"](agent)
-            captured["force_native_vision"] = agent._runtime_force_native_vision
+            captured["force_native_vision"] = getattr(
+                agent,
+                "_runtime_force_native_vision",
+                False,
+            )
+            captured["tool_result_image_mode"] = (
+                agent._runtime_tool_result_image_mode
+            )
             captured["user_message"] = kwargs["user_message"]
             assert agent.valid_tool_names == {"image_analyze"}
             marker = next(
@@ -767,7 +774,8 @@ async def test_runtime_bridge_delivers_image_attachment_as_multimodal_user_conte
         assert isinstance(content, list)
         assert content[0] == {"type": "text", "text": "describe it"}
         assert content[-1]["image_url"]["url"] == f"data:image/png;base64,{encoded}"
-        assert captured["force_native_vision"] is True
+        assert captured["force_native_vision"] is False
+        assert captured["tool_result_image_mode"] == "attach_by_ref"
         assert not Path(captured["image_path"]).exists()
     finally:
         await client.close()
@@ -2279,12 +2287,10 @@ def test_resume_attachment_projection_strips_private_runtime_metadata():
 
     assert projected is not durable_history
     assert durable_history[-1]["content"] == '{"asset_id":"asset-1"}'
-    assert isinstance(projected[-1]["content"], list)
-    assert all(
-        not any(str(key).startswith("_runtime_") for key in part)
-        for part in projected[-1]["content"]
-        if isinstance(part, dict)
-    )
+    assert isinstance(projected[-1]["content"], str)
+    assert "_runtime_image_path" not in projected[-1]["content"]
+    assert "data:image" not in projected[-1]["content"]
+    assert "image_url=/tmp/output.png" in projected[-1]["content"]
 
 
 def test_seed_runtime_session_reports_seed_and_cleanup_failures():
@@ -2842,22 +2848,14 @@ async def test_runtime_session_db_resume_projects_generated_output_after_durable
                 "output_id": "output_1",
             }
             assert "runtime_generated_media_context" not in persisted_result
-            assert isinstance(history[-1]["content"], list)
-            assert history[-1]["content"][0] == {
-                "type": "text",
-                "text": persisted_result,
-            }
-            marker = next(
-                part["text"]
-                for part in history[-1]["content"]
-                if part.get("type") == "text" and "image_url=" in part.get("text", "")
-            )
+            projected_result = history[-1]["content"]
+            assert isinstance(projected_result, str)
+            assert projected_result.startswith(persisted_result)
+            assert "data:image" not in projected_result
+            assert "image_url=" in projected_result
+            marker = projected_result
             assert "runtime_generated_media_context" not in json.dumps(history[-1])
-            assert all(
-                not any(str(key).startswith("_runtime_") for key in part)
-                for part in history[-1]["content"]
-                if isinstance(part, dict)
-            )
+            assert "_runtime_image_path" not in projected_result
             image_path = marker.split("image_url=", 1)[1].split(". Keep", 1)[0]
             captured["image_path"] = image_path
             assert Path(image_path).read_bytes() == b"generated-pixels"
@@ -2997,6 +2995,8 @@ async def test_runtime_run_pins_one_hour_prompt_cache_ttl():
     ("result", "expected"),
     [
         ({"failed": True, "failure_reason": "timeout"}, "provider_timeout"),
+        ({"failed": True, "failure_reason": "format_error"}, "model_incompatible"),
+        ({"failed": True, "failure_reason": "multimodal_tool_content_unsupported"}, "model_incompatible"),
         ({"failed": True, "turn_exit_reason": "empty_response_exhausted"}, "provider_empty_stream"),
         ({"failed": True, "error": "content_policy_blocked: rejected"}, "content_policy_blocked"),
         ({"failed": True, "error": "private downstream detail"}, "runtime_unavailable"),
