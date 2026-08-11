@@ -30,6 +30,7 @@ RUNTIME_CAPABILITIES = (
 _SAFE_ERROR_MESSAGES = {
     "content_policy_blocked": "The request could not be completed because of a content policy.",
     "insufficient_credits": "The current Account does not have enough credit for this request.",
+    "model_incompatible": "The selected model could not accept the generated result.",
     "provider_empty_stream": "The creation service returned no output.",
     "provider_timeout": "The creation service timed out.",
     "provider_unavailable": "The creation service is temporarily unavailable.",

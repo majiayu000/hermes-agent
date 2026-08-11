@@ -2457,19 +2457,24 @@ def run_conversation(
                             "or shrink didn't reduce size; surfacing original error."
                         )
 
-                # Multimodal-tool-content recovery: providers that follow
-                # the OpenAI spec strictly (tool message content must be a
-                # string) reject our list-type content with a 400.  Strip
-                # image parts from any list-type tool messages, mark the
-                # (provider, model) as no-list-tool-content for the rest
-                # of this session so future tool results preemptively
-                # downgrade, and retry once.  See issue #27344.
-                if (
-                    classified.reason == FailoverReason.multimodal_tool_content_unsupported
-                    and not _retry.multimodal_tool_content_retry_attempted
+                # Multimodal-tool-content recovery.  Prefer the classified
+                # provider signal when available, but do not depend on error
+                # wording: a generic 400/422 format rejection plus an actual
+                # image-bearing role=tool payload is enough to try the safe
+                # text/reference projection once.  See issue #27344.
+                from agent.tool_result_routing import (
+                    _should_retry_tool_result_projection,
+                )
+                if _should_retry_tool_result_projection(
+                    status_code,
+                    classified.reason,
+                    api_messages,
+                    already_attempted=(
+                        _retry.multimodal_tool_content_retry_attempted
+                    ),
                 ):
-                    _retry.multimodal_tool_content_retry_attempted = True
                     if agent._try_strip_image_parts_from_tool_messages(api_messages):
+                        _retry.multimodal_tool_content_retry_attempted = True
                         agent._vprint(
                             f"{agent.log_prefix}📐 Provider rejected list-type tool content — "
                             f"downgraded screenshots to text and retrying...",
@@ -2477,6 +2482,7 @@ def run_conversation(
                         )
                         continue
                     else:
+                        _retry.multimodal_tool_content_retry_attempted = True
                         logger.info(
                             "multimodal-tool-content recovery: no list-type tool "
                             "messages with image parts found; surfacing original error."
