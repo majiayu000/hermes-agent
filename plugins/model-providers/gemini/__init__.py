@@ -55,6 +55,7 @@ gemini = GeminiProfile(
     env_vars=("GOOGLE_API_KEY", "GEMINI_API_KEY"),
     base_url="https://generativelanguage.googleapis.com/v1beta",
     auth_type="api_key",
+    tool_result_image_mode="embed_data_url",
     default_aux_model="gemini-3.5-flash",
 )
 

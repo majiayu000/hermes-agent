@@ -113,6 +113,8 @@ _FINISHED_SESSION_TTL_SECONDS = 120.0
 _FAILURE_REASON_CODES = {
     "billing": "insufficient_credits",
     "content_policy_blocked": "content_policy_blocked",
+    "format_error": "model_incompatible",
+    "multimodal_tool_content_unsupported": "model_incompatible",
     "timeout": "provider_timeout",
     "overloaded": "provider_unavailable",
     "rate_limit": "provider_unavailable",
@@ -844,10 +846,31 @@ def _project_runtime_resume_attachments(
         base_parts = []
     else:
         base_parts = [{"type": "text", "text": str(content)}]
-    tail["content"] = [
+    # Resume media is appended to a durable role=tool result.  Never place
+    # pixels in that message: the selected model may accept user images while
+    # rejecting multipart tool results.  Retain the asset/path reference so
+    # the model can pass it to another media tool or call image_analyze.
+    reference_text: list[str] = []
+    for part in [
         *base_parts,
         *_public_runtime_attachment_parts(attachment_parts),
-    ]
+    ]:
+        if isinstance(part, str):
+            if part.strip():
+                reference_text.append(part.strip())
+            continue
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") in {"image_url", "input_image"}:
+            continue
+        if part.get("type") in {"text", "input_text"}:
+            text = str(part.get("text") or "").strip()
+            if text:
+                reference_text.append(text)
+    tail["content"] = (
+        "\n\n".join(reference_text)
+        or "[Generated media is available through its retained asset reference.]"
+    )
     projected[-1] = tail
     return projected
 
@@ -2146,11 +2169,11 @@ class APIServerRuntimeMixin:
             agent._resume_from_tool_results = intent == "resume"
             agent._retry_current_turn = intent == "retry"
             agent._require_incremental_session_persistence = True
-            # The Orchestrator already validated and materialized these image
-            # assets. Its model catalog can lag newly deployed multimodal
-            # aliases, so do not replace trusted pixels with an auxiliary
-            # vision description merely because models.dev lacks the alias.
-            agent._runtime_force_native_vision = has_image_attachment
+            # Runtime resume attaches generated media to a role=tool result.
+            # Preserve references and route pixel inspection through the
+            # scoped image_analyze tool; never infer tool-result compatibility
+            # merely from the presence of an image attachment.
+            agent._runtime_tool_result_image_mode = "attach_by_ref"
             # Runtime bridge runs park on media generation for well over the
             # default 5m prompt-cache TTL, so a resume repays the full 13-14k
             # token system prefix at uncached price. Pin the 1h tier (the

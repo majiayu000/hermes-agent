@@ -4554,22 +4554,32 @@ class AIAgent:
         except Exception:
             return False
 
-    def _provider_supports_vision_tool_messages(self) -> bool:
-        """Return True if the active provider accepts list-type tool content.
+    def _tool_result_image_mode(self) -> str:
+        """Return the integration-verified image contract for tool results."""
+        from agent.tool_result_routing import _resolve_tool_result_image_mode
 
-        Some providers (e.g. Xiaomi MiMo) support multimodal user messages
-        but reject list-type tool message content with 400 errors.  This
-        checks the provider profile's ``supports_vision_tool_messages`` field.
-        """
         try:
-            from providers import get_provider_profile
-            provider = (getattr(self, "provider", "") or "").strip()
-            profile = get_provider_profile(provider)
-            if profile is not None:
-                return getattr(profile, "supports_vision_tool_messages", True)
+            from hermes_cli.config import load_config
+
+            cfg = load_config()
         except Exception:
-            pass
-        return True  # default: assume compatible
+            cfg = {}
+        return _resolve_tool_result_image_mode(
+            (getattr(self, "provider", "") or "").strip(),
+            (getattr(self, "model", "") or "").strip(),
+            cfg,
+            runtime_override=getattr(
+                self,
+                "_runtime_tool_result_image_mode",
+                None,
+            ),
+        )
+
+    def _provider_supports_vision_tool_messages(self) -> bool:
+        """Compatibility predicate for callers that only need embed/no-embed."""
+        from agent.tool_result_routing import TOOL_RESULT_IMAGE_EMBED_DATA_URL
+
+        return self._tool_result_image_mode() == TOOL_RESULT_IMAGE_EMBED_DATA_URL
 
     def _preprocess_anthropic_content(self, content: Any, role: str) -> Any:
         if not self._content_has_image_parts(content):
@@ -4634,6 +4644,7 @@ class AIAgent:
         return t
 
     def _prepare_anthropic_messages_for_api(self, api_messages: list) -> list:
+        api_messages = self._prepare_tool_result_images_for_active_model(api_messages)
         # Fast exit when no message carries image content at all.
         if not any(
             isinstance(msg, dict) and self._content_has_image_parts(msg.get("content"))
@@ -4670,6 +4681,7 @@ class AIAgent:
         replaced by a cached auxiliary-vision text description so the turn
         doesn't fail with "model does not support image input".
         """
+        api_messages = self._prepare_tool_result_images_for_active_model(api_messages)
         if not any(
             isinstance(msg, dict) and self._content_has_image_parts(msg.get("content"))
             for msg in api_messages
@@ -4693,6 +4705,38 @@ class AIAgent:
             )
         return transformed
 
+    def _prepare_tool_result_images_for_active_model(self, api_messages: list) -> list:
+        """Apply the tool-result image contract to restored/history messages.
+
+        New tool results are projected when they are created, but resume,
+        compaction, and externally reconstructed history can reintroduce list
+        content.  Reapplying the same projection immediately before every
+        provider request makes that boundary idempotent.
+        """
+        from agent.tool_result_routing import (
+            TOOL_RESULT_IMAGE_EMBED_DATA_URL,
+            _has_inline_image_tool_result,
+        )
+
+        key = (
+            (getattr(self, "provider", "") or "").strip().lower(),
+            (getattr(self, "model", "") or "").strip(),
+        )
+        learned_rejection = key in (
+            getattr(self, "_no_list_tool_content_models", None) or set()
+        )
+        if (
+            self._tool_result_image_mode() == TOOL_RESULT_IMAGE_EMBED_DATA_URL
+            and not learned_rejection
+        ):
+            return api_messages
+        if not _has_inline_image_tool_result(api_messages):
+            return api_messages
+
+        transformed = copy.deepcopy(api_messages)
+        self._try_strip_image_parts_from_tool_messages(transformed)
+        return transformed
+
     def _tool_result_content_for_active_model(self, tool_name: str, result: Any) -> Any:
         """Return the tool message content that is safe for the active model.
 
@@ -4709,18 +4753,16 @@ class AIAgent:
         if not self._content_has_image_parts(content):
             return content
 
-        if self._model_supports_vision():
-            # Vision-capable on paper — but if the provider rejects list-type
-            # tool content (e.g. Xiaomi MiMo's 400 "text is not set"), or if
-            # we've already learned this lesson in-session, short-circuit to
-            # a text summary so we don't burn a round-trip relearning it.
-            if not self._provider_supports_vision_tool_messages():
-                logger.debug(
-                    "Tool %s: provider %s does not accept list-type tool "
-                    "content — sending text summary",
-                    tool_name, getattr(self, "provider", ""),
-                )
-                return _multimodal_text_summary(result)
+        from agent.tool_result_routing import TOOL_RESULT_IMAGE_EMBED_DATA_URL
+
+        supports_model_vision = self._model_supports_vision()
+        tool_result_image_mode = self._tool_result_image_mode()
+        if (
+            supports_model_vision
+            and tool_result_image_mode == TOOL_RESULT_IMAGE_EMBED_DATA_URL
+        ):
+            # Even an explicitly compatible route can be downgraded after one
+            # payload-driven rejection in this session.
             key = (
                 (getattr(self, "provider", "") or "").strip().lower(),
                 (getattr(self, "model", "") or "").strip(),
@@ -4736,7 +4778,7 @@ class AIAgent:
             return content
 
         summary = _multimodal_text_summary(result)
-        if tool_name == "computer_use":
+        if tool_name == "computer_use" and not supports_model_vision:
             return json.dumps({
                 "error": (
                     "computer_use returned screenshot/image content, but the active "
@@ -4748,11 +4790,12 @@ class AIAgent:
             })
 
         logger.warning(
-            "Tool %s returned image content for non-vision model %s/%s; "
-            "falling back to text summary",
+            "Tool %s returned image content for %s/%s; projecting mode=%s "
+            "to text/reference content",
             tool_name,
             self.provider,
             self.model,
+            tool_result_image_mode,
         )
         return summary
 
@@ -4786,10 +4829,14 @@ class AIAgent:
         this to decide whether to retry the API call with the modified
         history or surface the original error.
         """
-        if not isinstance(api_messages, list):
+        from agent.tool_result_routing import _strip_inline_image_tool_results
+
+        changed = _strip_inline_image_tool_results(api_messages)
+        if not changed:
             return False
 
-        # Record (provider, model) so we don't relearn this lesson.
+        # Record only after the payload was actually changed.  A generic 400
+        # without an image-bearing tool result must not poison the model key.
         key = (
             (getattr(self, "provider", "") or "").strip().lower(),
             (getattr(self, "model", "") or "").strip(),
@@ -4798,50 +4845,7 @@ class AIAgent:
             self._no_list_tool_content_models = set()
         if key[1]:  # only record when we actually have a model id
             self._no_list_tool_content_models.add(key)
-
-        changed = False
-        for msg in api_messages:
-            if not isinstance(msg, dict) or msg.get("role") != "tool":
-                continue
-            content = msg.get("content")
-            if not isinstance(content, list):
-                continue
-
-            # Salvage any text parts so the model still sees some signal.
-            text_parts: List[str] = []
-            had_image = False
-            for part in content:
-                if not isinstance(part, dict):
-                    if isinstance(part, str) and part.strip():
-                        text_parts.append(part.strip())
-                    continue
-                ptype = part.get("type")
-                if ptype == "image_url" or ptype == "input_image":
-                    had_image = True
-                    continue
-                if ptype in {"text", "input_text"}:
-                    text = str(part.get("text") or "").strip()
-                    if text:
-                        text_parts.append(text)
-
-            if not had_image:
-                # List-type content but no image parts — leave alone (some
-                # providers reject ANY list content, but stripping a
-                # text-only list doesn't reduce ambiguity; let the caller
-                # surface the original error if this turns out to be the
-                # case).
-                continue
-
-            if text_parts:
-                msg["content"] = "\n\n".join(text_parts)
-            else:
-                msg["content"] = (
-                    "[image content removed — provider does not accept "
-                    "list-type tool message content]"
-                )
-            changed = True
-
-        return changed
+        return True
 
     def _anthropic_preserve_dots(self) -> bool:
         """True when using an anthropic-compatible endpoint that preserves dots in model names.
