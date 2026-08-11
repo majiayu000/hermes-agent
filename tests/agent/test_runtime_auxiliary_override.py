@@ -6,6 +6,7 @@ from agent.auxiliary_client import (
     _resolve_task_provider_model,
     clear_runtime_auxiliary_overrides,
     set_runtime_auxiliary_override,
+    set_runtime_auxiliary_unavailable,
 )
 
 
@@ -59,4 +60,29 @@ def test_runtime_vision_override_does_not_leak_to_a_fresh_context():
         "http://agent-orchestrator:8093/internal/llm/v1",
         "ueg_" + "a" * 43,
         "chat_completions",
+    )
+
+
+def test_missing_runtime_vision_capability_fails_only_the_auxiliary_task():
+    set_runtime_auxiliary_unavailable("vision")
+
+    with pytest.raises(ValueError, match="run-scoped auxiliary capability"):
+        _resolve_task_provider_model(
+            "vision",
+            provider="atlas",
+            model="google/gemini-3-flash-preview",
+        )
+
+    assert _resolve_task_provider_model(
+        "compression",
+        provider="custom",
+        model="zai-org/glm-5.2",
+        base_url="http://agent-orchestrator:8093/internal/llm/v1",
+        api_key="ueg_" + "b" * 43,
+    ) == (
+        "custom",
+        "zai-org/glm-5.2",
+        "http://agent-orchestrator:8093/internal/llm/v1",
+        "ueg_" + "b" * 43,
+        None,
     )

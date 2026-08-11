@@ -1976,6 +1976,16 @@ def set_runtime_auxiliary_override(
     _RUNTIME_AUXILIARY_OVERRIDES.set(overrides)
 
 
+def set_runtime_auxiliary_unavailable(task: str) -> None:
+    """Fail one Runtime-owned auxiliary task closed without blocking the Run."""
+    task = (task or "").strip()
+    if not task:
+        raise ValueError("runtime auxiliary task is required")
+    overrides = dict(_RUNTIME_AUXILIARY_OVERRIDES.get())
+    overrides[task] = {"error": "run-scoped auxiliary capability is unavailable"}
+    _RUNTIME_AUXILIARY_OVERRIDES.set(overrides)
+
+
 def clear_runtime_auxiliary_overrides() -> None:
     """Drop run-scoped auxiliary credentials before a worker context is reused."""
     _RUNTIME_AUXILIARY_OVERRIDES.set({})
@@ -5241,6 +5251,8 @@ def _resolve_task_provider_model(
     """
     runtime_override = _RUNTIME_AUXILIARY_OVERRIDES.get().get(task or "")
     if runtime_override:
+        if runtime_override.get("error"):
+            raise ValueError(runtime_override["error"])
         return (
             runtime_override["provider"],
             runtime_override["model"],

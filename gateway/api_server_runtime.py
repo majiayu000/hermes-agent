@@ -1977,10 +1977,6 @@ class APIServerRuntimeMixin:
             vision_llm_egress = _runtime_vision_llm_egress(
                 body.get("vision_llm_egress")
             )
-            if require_llm_egress and vision_llm_egress is None:
-                raise ValueError(
-                    "vision_llm_egress must contain model, base_url, grant, and expires_at"
-                )
             intent = body.get("intent")
             if not isinstance(intent, str) or intent not in {"bootstrap", "new_turn", "resume", "retry"}:
                 raise ValueError("intent must be bootstrap, new_turn, resume, or retry")
@@ -2243,6 +2239,10 @@ class APIServerRuntimeMixin:
                     base_url=vision_llm_egress["base_url"],
                     api_key=vision_llm_egress["grant"],
                 )
+            else:
+                from agent.auxiliary_client import set_runtime_auxiliary_unavailable
+
+                set_runtime_auxiliary_unavailable("vision")
             _pin_run_model(agent, body.get("model"))
             # The Orchestrator owns the complete per-Run Tool grant. Hermes'
             # ordinary between-turn MCP refresh rebuilds from a process-global
