@@ -45,6 +45,7 @@ from gateway.api_server_runtime import (
     _validate_runtime_artifact_manifest,
 )
 from agent.tool_dispatch_helpers import DeferredToolResult
+from model_tools import coerce_tool_args
 from hermes_state import SessionDB
 from gateway.runtime_contract import RUNTIME_DRIVER_FRAME_TYPES
 from gateway.runtime_session_history import RuntimeSessionStateError, seed_runtime_session
@@ -708,6 +709,88 @@ def test_runtime_image_tool_allows_remote_and_scopes_local_sources(tmp_path):
         }
     finally:
         runtime_module._SESSIONS.pop("agent_image", None)
+        session.loop.close()
+
+
+def test_runtime_image_tool_accepts_coerced_json_encoded_allowed_path_array(tmp_path):
+    allowed_paths = [tmp_path / "one.png", tmp_path / "two.png"]
+    for path in allowed_paths:
+        path.write_bytes(b"image")
+    queue = asyncio.Queue()
+    session = RuntimeBridgeSession(
+        "run_image_json_array",
+        asyncio.new_event_loop(),
+        queue,
+        [],
+        1_000,
+        "agent_image_json_array",
+        allowed_image_paths={str(path) for path in allowed_paths},
+    )
+    runtime_module._SESSIONS["agent_image_json_array"] = session
+    try:
+        seen = []
+        args = coerce_tool_args("image_analyze", {
+            "image_paths": json.dumps([str(path) for path in allowed_paths]),
+            "question": "Compare them",
+        })
+        assert args["image_paths"] == [str(path) for path in allowed_paths]
+        accepted = _runtime_tool_middleware(
+            tool_name="image_analyze",
+            args=args,
+            session_id="agent_image_json_array",
+            tool_call_id="image_json_array_ok",
+            next_call=lambda args: seen.append(args) or '{"success":true}',
+        )
+        assert accepted == '{"success":true}'
+        assert seen == [{
+            "image_paths": [str(path) for path in allowed_paths],
+            "question": "Compare them",
+        }]
+    finally:
+        runtime_module._SESSIONS.pop("agent_image_json_array", None)
+        session.loop.close()
+
+
+def test_runtime_image_tool_rejects_json_encoded_array_with_unowned_path(tmp_path):
+    allowed = tmp_path / "allowed.png"
+    unowned = tmp_path / "unowned.png"
+    allowed.write_bytes(b"image")
+    unowned.write_bytes(b"image")
+    queue = asyncio.Queue()
+    session = RuntimeBridgeSession(
+        "run_image_json_array_denied",
+        asyncio.new_event_loop(),
+        queue,
+        [],
+        1_000,
+        "agent_image_json_array_denied",
+        allowed_image_paths={str(allowed)},
+    )
+    runtime_module._SESSIONS["agent_image_json_array_denied"] = session
+    try:
+        args = coerce_tool_args("image_analyze", {
+            "image_paths": json.dumps([str(allowed), str(unowned)]),
+            "question": "Compare them",
+        })
+        assert args["image_paths"] == [str(allowed), str(unowned)]
+        denied = _runtime_tool_middleware(
+            tool_name="image_analyze",
+            args=args,
+            session_id="agent_image_json_array_denied",
+            tool_call_id="image_json_array_denied",
+            next_call=lambda _args: pytest.fail(
+                "an unowned path reached the image tool"
+            ),
+        )
+        assert json.loads(denied) == {
+            "success": False,
+            "error": (
+                "image_analyze may only read HTTP(S) images or local image "
+                "attachments owned by this run."
+            ),
+        }
+    finally:
+        runtime_module._SESSIONS.pop("agent_image_json_array_denied", None)
         session.loop.close()
 
 

@@ -14,6 +14,7 @@ from model_tools import (
     _coerce_number,
     _coerce_boolean,
 )
+from agent.tool_executor import _coerce_tool_args_for_policy
 
 
 # ── Low-level coercion helpers ────────────────────────────────────────────
@@ -347,6 +348,44 @@ class TestCoerceToolArgs:
             args = {"items": '["a","b"]'}
             result = coerce_tool_args("test_tool", args)
             assert result["items"] == ["a", "b"]
+
+    def test_json_encoded_array_parses_when_any_of_allows_string_or_array(self):
+        schema = self._mock_schema({
+            "items": {
+                "anyOf": [
+                    {"type": "string"},
+                    {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                ],
+            },
+        })
+        with patch("model_tools.registry.get_schema", return_value=schema):
+            args = {"items": '["a","b"]'}
+            result = coerce_tool_args("test_tool", args)
+            assert result["items"] == ["a", "b"]
+
+    def test_bare_string_stays_string_when_any_of_allows_string_or_array(self):
+        schema = self._mock_schema({
+            "items": {
+                "anyOf": [
+                    {"type": "string"},
+                    {"type": "array", "items": {"type": "string"}},
+                ],
+            },
+        })
+        with patch("model_tools.registry.get_schema", return_value=schema):
+            args = {"items": "https://example.com/image.png"}
+            result = coerce_tool_args("test_tool", args)
+            assert result["items"] == "https://example.com/image.png"
+
+    def test_policy_boundary_receives_normalized_image_array(self):
+        result = _coerce_tool_args_for_policy("image_analyze", {
+            "image_paths": '["/tmp/one.png","/tmp/two.png"]',
+            "question": "Compare them",
+        })
+        assert result["image_paths"] == ["/tmp/one.png", "/tmp/two.png"]
 
     def test_extra_args_without_schema_left_alone(self):
         """Args not in the schema properties are not touched."""

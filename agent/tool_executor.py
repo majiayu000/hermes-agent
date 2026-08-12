@@ -252,6 +252,21 @@ def _apply_tool_request_middleware_for_agent(
         return function_args, []
 
 
+def _coerce_tool_args_for_policy(
+    function_name: str,
+    function_args: dict,
+) -> dict:
+    """Normalize schema-declared types before any policy observes a call."""
+    try:
+        from model_tools import coerce_tool_args
+
+        coerced = coerce_tool_args(function_name, function_args)
+        return coerced if isinstance(coerced, dict) else function_args
+    except Exception as exc:
+        logger.debug("tool argument coercion error: %s", exc)
+        return function_args
+
+
 def _run_agent_tool_execution_middleware(
     agent,
     *,
@@ -366,6 +381,10 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         except Exception:
             pass
 
+        function_args = _coerce_tool_args_for_policy(
+            function_name,
+            function_args,
+        )
         function_args, middleware_trace = _apply_tool_request_middleware_for_agent(
             agent,
             function_name=function_name,
@@ -928,6 +947,10 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         except Exception:
             pass
 
+        function_args = _coerce_tool_args_for_policy(
+            function_name,
+            function_args,
+        )
         function_args, middleware_trace = _apply_tool_request_middleware_for_agent(
             agent,
             function_name=function_name,

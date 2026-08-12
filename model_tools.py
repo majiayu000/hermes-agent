@@ -672,7 +672,7 @@ def coerce_tool_args(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         prop_schema = properties.get(key)
         if not prop_schema:
             continue
-        expected = prop_schema.get("type")
+        expected = _schema_expected_types(prop_schema)
 
         if not isinstance(value, str):
             continue
@@ -683,6 +683,37 @@ def coerce_tool_args(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
             args[key] = coerced
 
     return args
+
+
+def _schema_expected_types(schema: dict | None) -> list[str]:
+    """Return every declared JSON type, including union variants.
+
+    Tool schemas commonly express scalar-or-container inputs with ``anyOf``
+    or ``oneOf``.  Models sometimes serialize the permitted container as a
+    JSON string, so coercion must see those nested types before policy
+    middleware evaluates the call.
+    """
+    if not isinstance(schema, dict):
+        return []
+
+    expected: list[str] = []
+
+    def add_type(value: Any) -> None:
+        candidates = value if isinstance(value, list) else [value]
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate not in expected:
+                expected.append(candidate)
+
+    add_type(schema.get("type"))
+    for union_key in ("anyOf", "oneOf"):
+        variants = schema.get(union_key)
+        if not isinstance(variants, list):
+            continue
+        for variant in variants:
+            if isinstance(variant, dict):
+                for candidate in _schema_expected_types(variant):
+                    add_type(candidate)
+    return expected
 
 
 def _coerce_value(value: str, expected_type, schema: dict | None = None):
