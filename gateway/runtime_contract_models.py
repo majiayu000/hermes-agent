@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Annotated, Literal, TypeAlias
 
 from pydantic import (
@@ -332,3 +333,13 @@ def decode_runtime_error(value: object) -> RuntimeError:
 
 def decode_runtime_event(value: object) -> RuntimeEvent:
     return _RUNTIME_EVENT_ADAPTER.validate_python(value)
+
+
+def encode_runtime_event(value: object) -> bytes:
+    """Encode one Runtime event only after the strict consumer accepts it."""
+    event = decode_runtime_event(value)
+    return json.dumps(
+        event.model_dump(mode="json", exclude_none=True),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
