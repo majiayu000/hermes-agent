@@ -71,11 +71,20 @@ class RuntimeCapabilityVerifier:
         self._seen_jti: dict[str, int] = {}
         self._lock = threading.Lock()
 
-    async def verify(self, request: Any) -> dict[str, Any]:
+    def verify_service_identity(self, request: Any) -> None:
+        """Verify the transport caller without consuming an operation grant.
+
+        Read-only negotiation endpoints have no run or operation to bind, but
+        they still must not be anonymously callable on the private Runtime
+        surface.
+        """
         service_header = request.headers.get(_SERVICE_HEADER, "")
         expected_service = "Bearer " + self._config.service_token
         if not hmac.compare_digest(service_header, expected_service):
             raise RuntimeCapabilityError("invalid runtime service credential")
+
+    async def verify(self, request: Any) -> dict[str, Any]:
+        self.verify_service_identity(request)
 
         authorization = request.headers.get("Authorization", "")
         if not authorization.startswith("Bearer "):

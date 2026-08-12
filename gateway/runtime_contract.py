@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from pathlib import Path
 from typing import Any
 
 RUNTIME_PROTOCOL_VERSION = "2"
@@ -29,6 +32,28 @@ RUNTIME_CAPABILITIES = (
     "vision_llm_egress",
 )
 
+_RUN_REQUEST_SCHEMA_PATH = (
+    Path(__file__).resolve().parent
+    / "contracts"
+    / "runtime"
+    / "v1"
+    / "run-request.schema.json"
+)
+_RUN_REQUEST_SCHEMA_BYTES = _RUN_REQUEST_SCHEMA_PATH.read_bytes()
+_RUN_REQUEST_SCHEMA = json.loads(_RUN_REQUEST_SCHEMA_BYTES)
+_RUN_REQUEST_METADATA = _RUN_REQUEST_SCHEMA["x-ultra-contract"]
+
+RUNTIME_CONTRACT_MAJOR = int(_RUN_REQUEST_METADATA["major"])
+RUNTIME_CONTRACT_MINOR = int(_RUN_REQUEST_METADATA["minor"])
+RUNTIME_RUN_REQUEST_SCHEMA_DIGEST = (
+    "sha256:" + hashlib.sha256(_RUN_REQUEST_SCHEMA_BYTES).hexdigest()
+)
+RUNTIME_RUN_REQUEST_FIELDS = frozenset(_RUN_REQUEST_SCHEMA["properties"])
+RUNTIME_RUN_INTENTS = tuple(
+    _RUN_REQUEST_SCHEMA["properties"]["intent"]["enum"]
+)
+RUNTIME_MANIFEST_FEATURES = tuple(_RUN_REQUEST_METADATA["features"])
+
 _SAFE_ERROR_MESSAGES = {
     "content_policy_blocked": "The request could not be completed because of a content policy.",
     "insufficient_credits": "The current Account does not have enough credit for this request.",
@@ -53,6 +78,31 @@ def runtime_health_contract() -> dict[str, Any]:
         "runtime_protocol_version": RUNTIME_PROTOCOL_VERSION,
         "runtime_frame_types": list(RUNTIME_DRIVER_FRAME_TYPES),
         "runtime_capabilities": list(RUNTIME_CAPABILITIES),
+    }
+
+
+def runtime_manifest_contract(
+    *,
+    runtime_build: str,
+    max_request_bytes: int,
+    max_tool_result_bytes: int,
+) -> dict[str, Any]:
+    """Return the non-sensitive Runtime compatibility advertisement."""
+    return {
+        "runtime": "hermes",
+        "runtime_build": runtime_build,
+        "contract": {
+            "major": RUNTIME_CONTRACT_MAJOR,
+            "min_minor": RUNTIME_CONTRACT_MINOR,
+            "max_minor": RUNTIME_CONTRACT_MINOR,
+            "schema_digests": [RUNTIME_RUN_REQUEST_SCHEMA_DIGEST],
+        },
+        "intents": list(RUNTIME_RUN_INTENTS),
+        "features": list(RUNTIME_MANIFEST_FEATURES),
+        "limits": {
+            "max_request_bytes": max_request_bytes,
+            "max_tool_result_bytes": max_tool_result_bytes,
+        },
     }
 
 
