@@ -1859,7 +1859,10 @@ class RuntimeBridgeSession:
             self._assert_active_tool_call_persisted(call_id, name)
         except _RuntimeSessionStateError as exc:
             message = str(exc)
-            self.emit("error", {"code": exc.code, "message": message})
+            self.emit(
+                "error",
+                {"code": exc.code, "message": message, "retryable": False},
+            )
             self.interrupt(message)
             return json.dumps({
                 "error": {
@@ -2352,7 +2355,21 @@ class APIServerRuntimeMixin:
         _ensure_session_sweeper()
         with _SESSIONS_LOCK:
             if run_id in _SESSIONS or agent_session_id in _SESSIONS:
-                await response.write(json.dumps({"run_id": run_id, "type": "error", "payload": {"code": "run_state_conflict", "message": "run already active"}}).encode() + b"\n")
+                await response.write(
+                    json.dumps(
+                        {
+                            "run_id": run_id,
+                            "type": "error",
+                            "payload": runtime_error_envelope(
+                                "run_state_conflict",
+                                support_id=run_id,
+                            ),
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    + b"\n"
+                )
                 if media_temp_dir is not None:
                     media_temp_dir.cleanup()
                 return response

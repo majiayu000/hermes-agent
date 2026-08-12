@@ -32,27 +32,48 @@ RUNTIME_CAPABILITIES = (
     "vision_llm_egress",
 )
 
-_RUN_REQUEST_SCHEMA_PATH = (
-    Path(__file__).resolve().parent
-    / "contracts"
-    / "runtime"
-    / "v1"
-    / "run-request.schema.json"
+_RUNTIME_CONTRACT_ROOT = Path(__file__).resolve().parent / "contracts" / "runtime"
+_RUNTIME_CONTRACT_SCHEMA_DIR = _RUNTIME_CONTRACT_ROOT / "v1"
+_RUNTIME_CONTRACT_SCHEMA_NAMES = (
+    "error.schema.json",
+    "manifest.schema.json",
+    "run-request.schema.json",
+    "runtime-event.schema.json",
+    "tool-request.schema.json",
+    "tool-result.schema.json",
 )
+_RUN_REQUEST_SCHEMA_PATH = _RUNTIME_CONTRACT_SCHEMA_DIR / "run-request.schema.json"
 _RUN_REQUEST_SCHEMA_BYTES = _RUN_REQUEST_SCHEMA_PATH.read_bytes()
 _RUN_REQUEST_SCHEMA = json.loads(_RUN_REQUEST_SCHEMA_BYTES)
 _RUN_REQUEST_METADATA = _RUN_REQUEST_SCHEMA["x-ultra-contract"]
+
+
+def _runtime_contract_bundle_digest() -> str:
+    digest = hashlib.sha256()
+    for name in sorted(_RUNTIME_CONTRACT_SCHEMA_NAMES):
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update((_RUNTIME_CONTRACT_SCHEMA_DIR / name).read_bytes())
+        digest.update(b"\0")
+    return "sha256:" + digest.hexdigest()
+
 
 RUNTIME_CONTRACT_MAJOR = int(_RUN_REQUEST_METADATA["major"])
 RUNTIME_CONTRACT_MINOR = int(_RUN_REQUEST_METADATA["minor"])
 RUNTIME_RUN_REQUEST_SCHEMA_DIGEST = (
     "sha256:" + hashlib.sha256(_RUN_REQUEST_SCHEMA_BYTES).hexdigest()
 )
+RUNTIME_CONTRACT_SCHEMA_DIGEST = _runtime_contract_bundle_digest()
 RUNTIME_RUN_REQUEST_FIELDS = frozenset(_RUN_REQUEST_SCHEMA["properties"])
 RUNTIME_RUN_INTENTS = tuple(
     _RUN_REQUEST_SCHEMA["properties"]["intent"]["enum"]
 )
 RUNTIME_MANIFEST_FEATURES = tuple(_RUN_REQUEST_METADATA["features"])
+_RUNTIME_EVENT_SCHEMA = json.loads(
+    (_RUNTIME_CONTRACT_SCHEMA_DIR / "runtime-event.schema.json").read_bytes()
+)
+if tuple(_RUNTIME_EVENT_SCHEMA["properties"]["type"]["enum"]) != RUNTIME_DRIVER_FRAME_TYPES:
+    raise RuntimeError("Runtime event schema and frame vocabulary disagree")
 
 _SAFE_ERROR_MESSAGES = {
     "content_policy_blocked": "The request could not be completed because of a content policy.",
@@ -95,7 +116,7 @@ def runtime_manifest_contract(
             "major": RUNTIME_CONTRACT_MAJOR,
             "min_minor": RUNTIME_CONTRACT_MINOR,
             "max_minor": RUNTIME_CONTRACT_MINOR,
-            "schema_digests": [RUNTIME_RUN_REQUEST_SCHEMA_DIGEST],
+            "schema_digests": [RUNTIME_CONTRACT_SCHEMA_DIGEST],
         },
         "intents": list(RUNTIME_RUN_INTENTS),
         "features": list(RUNTIME_MANIFEST_FEATURES),

@@ -1,0 +1,34 @@
+contract_name: ultra.runtime
+contract_major: 1
+min_minor: 0
+max_minor: 0
+runtime_protocol_version: "2"
+schemas:
+  - error.schema.json
+  - manifest.schema.json
+  - run-request.schema.json
+  - runtime-event.schema.json
+  - tool-request.schema.json
+  - tool-result.schema.json
+intents:
+  - bootstrap
+  - new_turn
+  - resume
+  - retry
+  - rebootstrap
+features:
+  - llm_egress.v1
+  - session_db_rebootstrap.v1
+  - tool_result_replay.v1
+  - vision_llm_egress.v1
+runtime_frame_types:
+  - run_started
+  - heartbeat
+  - text_delta
+  - runtime_control_request
+  - tool_request
+  - activity_started
+  - activity_completed
+  - usage
+  - completed
+  - error
