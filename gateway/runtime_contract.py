@@ -7,6 +7,11 @@ import json
 from pathlib import Path
 from typing import Any
 
+from gateway.runtime_contract_models import (
+    decode_runtime_error,
+    decode_runtime_manifest,
+)
+
 RUNTIME_PROTOCOL_VERSION = "2"
 RUNTIME_DRIVER_FRAME_TYPES = (
     "run_started",
@@ -65,14 +70,15 @@ RUNTIME_RUN_REQUEST_SCHEMA_DIGEST = (
 )
 RUNTIME_CONTRACT_SCHEMA_DIGEST = _runtime_contract_bundle_digest()
 RUNTIME_RUN_REQUEST_FIELDS = frozenset(_RUN_REQUEST_SCHEMA["properties"])
-RUNTIME_RUN_INTENTS = tuple(
-    _RUN_REQUEST_SCHEMA["properties"]["intent"]["enum"]
-)
+RUNTIME_RUN_INTENTS = tuple(_RUN_REQUEST_SCHEMA["properties"]["intent"]["enum"])
 RUNTIME_MANIFEST_FEATURES = tuple(_RUN_REQUEST_METADATA["features"])
 _RUNTIME_EVENT_SCHEMA = json.loads(
     (_RUNTIME_CONTRACT_SCHEMA_DIR / "runtime-event.schema.json").read_bytes()
 )
-if tuple(_RUNTIME_EVENT_SCHEMA["properties"]["type"]["enum"]) != RUNTIME_DRIVER_FRAME_TYPES:
+if (
+    tuple(_RUNTIME_EVENT_SCHEMA["properties"]["type"]["enum"])
+    != RUNTIME_DRIVER_FRAME_TYPES
+):
     raise RuntimeError("Runtime event schema and frame vocabulary disagree")
 
 _SAFE_ERROR_MESSAGES = {
@@ -84,14 +90,12 @@ _SAFE_ERROR_MESSAGES = {
     "provider_unavailable": "The creation service is temporarily unavailable.",
     "runtime_unavailable": "The creation service is temporarily unavailable.",
 }
-_RETRYABLE_ERROR_CODES = frozenset(
-    {
-        "provider_empty_stream",
-        "provider_timeout",
-        "provider_unavailable",
-        "runtime_unavailable",
-    }
-)
+_RETRYABLE_ERROR_CODES = frozenset({
+    "provider_empty_stream",
+    "provider_timeout",
+    "provider_unavailable",
+    "runtime_unavailable",
+})
 
 
 def runtime_health_contract() -> dict[str, Any]:
@@ -109,7 +113,7 @@ def runtime_manifest_contract(
     max_tool_result_bytes: int,
 ) -> dict[str, Any]:
     """Return the non-sensitive Runtime compatibility advertisement."""
-    return {
+    manifest = {
         "runtime": "hermes",
         "runtime_build": runtime_build,
         "contract": {
@@ -125,11 +129,12 @@ def runtime_manifest_contract(
             "max_tool_result_bytes": max_tool_result_bytes,
         },
     }
+    return decode_runtime_manifest(manifest).model_dump(mode="python")
 
 
 def runtime_error_envelope(code: str, *, support_id: str) -> dict[str, Any]:
     normalized = _normalize_error_code(code)
-    return {
+    envelope = {
         "code": normalized,
         "message": _SAFE_ERROR_MESSAGES.get(
             normalized,
@@ -140,11 +145,18 @@ def runtime_error_envelope(code: str, *, support_id: str) -> dict[str, Any]:
         "source": "runtime",
         "support_id": support_id,
     }
+    return decode_runtime_error(envelope).model_dump(mode="python", exclude_none=True)
 
 
 def _normalize_error_code(code: str) -> str:
     if not isinstance(code, str) or not 1 <= len(code) <= 128:
         return "unexpected_error"
-    if any(not (character.isascii() and (character.islower() or character.isdigit() or character in "._")) for character in code):
+    if any(
+        not (
+            character.isascii()
+            and (character.islower() or character.isdigit() or character in "._")
+        )
+        for character in code
+    ):
         return "unexpected_error"
     return code

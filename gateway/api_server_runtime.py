@@ -44,6 +44,11 @@ from gateway.runtime_contract import (
     RUNTIME_RUN_REQUEST_FIELDS,
     runtime_error_envelope,
 )
+from gateway.runtime_contract_models import (
+    decode_runtime_event,
+    decode_runtime_run_request,
+    decode_runtime_tool_result,
+)
 from agent.tool_dispatch_helpers import DeferredToolResult
 from gateway.runtime_session_history import (
     RuntimeSessionStateError as _RuntimeSessionStateError,
@@ -238,7 +243,9 @@ async def _next_runtime_stream_event(
             timeout=_RUNTIME_STREAM_HEARTBEAT_SECONDS,
         )
     except asyncio.TimeoutError:
-        return {"type": "heartbeat", "payload": {}}
+        heartbeat: dict[str, Any] = {"type": "heartbeat", "payload": {}}
+        decode_runtime_event(heartbeat)
+        return heartbeat
 
 
 def _runtime_max_concurrent() -> int:
@@ -1738,6 +1745,12 @@ class RuntimeBridgeSession:
     def emit(self, event_type: str, payload: dict[str, Any]) -> None:
         event = {"run_id": self.run_id, "type": event_type, "payload": payload}
         try:
+            decode_runtime_event(event)
+        except ValueError:
+            raise RuntimeError(
+                f"Runtime event {event_type!r} violates the canonical contract"
+            ) from None
+        try:
             if asyncio.get_running_loop() is self.loop:
                 self.queue.put_nowait(event)
                 return
@@ -1894,7 +1907,12 @@ class RuntimeBridgeSession:
             if call_id in self.pending:
                 return json.dumps({"error": {"code": "idempotency_conflict", "message": "duplicate active tool call id"}})
             self.pending[call_id] = pending
-        payload: dict[str, Any] = {"call_id": call_id, "name": name, "arguments": args}
+        payload: dict[str, Any] = {
+            "call_id": call_id,
+            "name": name,
+            "arguments": args,
+            "skills": [],
+        }
         self.emit("tool_request", payload)
         wait_timeout = (
             self.deadline_seconds
@@ -2190,6 +2208,12 @@ class APIServerRuntimeMixin:
                     body.get("attachment_references"),
                 )
             )
+            try:
+                decode_runtime_run_request(body)
+            except ValueError as exc:
+                raise ValueError(
+                    "request violates the canonical Runtime contract"
+                ) from exc
             schemas = _tool_schemas(definitions)
             defined_tool_names = {
                 str(schema["function"]["name"])
@@ -2355,16 +2379,18 @@ class APIServerRuntimeMixin:
         _ensure_session_sweeper()
         with _SESSIONS_LOCK:
             if run_id in _SESSIONS or agent_session_id in _SESSIONS:
+                conflict_event = {
+                    "run_id": run_id,
+                    "type": "error",
+                    "payload": runtime_error_envelope(
+                        "run_state_conflict",
+                        support_id=run_id,
+                    ),
+                }
+                decode_runtime_event(conflict_event)
                 await response.write(
                     json.dumps(
-                        {
-                            "run_id": run_id,
-                            "type": "error",
-                            "payload": runtime_error_envelope(
-                                "run_state_conflict",
-                                support_id=run_id,
-                            ),
-                        },
+                        conflict_event,
                         ensure_ascii=False,
                         separators=(",", ":"),
                     ).encode("utf-8")
@@ -2559,6 +2585,18 @@ class APIServerRuntimeMixin:
             result = await request.json()
         except Exception:
             return web.json_response({"error": {"code": "invalid_param", "message": "invalid JSON"}}, status=400)
+        try:
+            decode_runtime_tool_result(result)
+        except ValueError:
+            return web.json_response(
+                {
+                    "error": {
+                        "code": "invalid_tool_result",
+                        "message": "result violates the Runtime contract",
+                    }
+                },
+                status=422,
+            )
         if not isinstance(result, dict) or not session.submit_result(result):
             return web.json_response({"error": {"code": "invalid_tool_result", "message": "unknown call_id"}}, status=409)
         return web.Response(status=204)

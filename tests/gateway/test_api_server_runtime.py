@@ -756,6 +756,7 @@ async def test_runtime_bridge_delivers_image_attachment_as_multimodal_user_conte
             "model": "chat-test",
             "context": {"session_id": "session-run-attachment"},
             "messages": [{"id": "message-attachment", "role": "user", "content": "describe it"}],
+            "tools": [],
             "system_context": {
                 "version": version,
                 "mode": "replace",
@@ -846,6 +847,7 @@ async def test_runtime_bridge_exposes_scoped_video_analysis_and_cleans_source_fi
             "model": "chat-test",
             "context": {"session_id": "session-run-video-attachment"},
             "messages": [{"id": "message-video-attachment", "role": "user", "content": "analyze the complete video"}],
+            "tools": [],
             "system_context": {
                 "version": version,
                 "mode": "replace",
@@ -910,6 +912,7 @@ async def test_runtime_driver_streams_tool_request_and_waits_for_result(monkeypa
             "model": "chat-test",
             "context": {"session_id": "panel_session_test"},
             "messages": [{"id": "message-run-test", "role": "user", "content": "make an image"}],
+            "tools": [],
             "system_context": {
                 "version": version,
                 "mode": mode,
@@ -1035,6 +1038,7 @@ async def test_runtime_driver_streams_tool_request_and_waits_for_result(monkeypa
             "call_id": "call_01",
             "name": "ultra_media_job_create",
             "arguments": {"operation": "image.generate", "prompt": "test"},
+            "skills": [],
         }
 
         delivered = await client.post("/v1/runtime/runs/run_test/tool-results", json={
@@ -1382,6 +1386,7 @@ async def test_runtime_driver_reports_skill_failure_without_result_content():
             "model": "chat-test",
             "context": {"session_id": "panel_session_failed_skill"},
             "messages": [{"id": "message-failed-skill", "role": "user", "content": "load a missing skill"}],
+            "tools": [],
             "system_context": {
                 "version": version,
                 "mode": mode,
@@ -1862,6 +1867,7 @@ async def test_runtime_driver_rejects_non_replacement_or_tampered_prompt():
             "model": "chat-test",
             "context": {"session_id": "panel_session_bad"},
             "messages": [{"id": "message-bad-prompt", "role": "user", "content": "hello"}],
+            "tools": [],
             "system_context": {
                 "version": "ultrastudio-supercomputer/v1",
                 "mode": "append",
@@ -1895,6 +1901,7 @@ def _run_body(run_id: str, **extra):
         "model": "chat-test",
         "context": {"session_id": f"session-{run_id}"},
         "messages": [{"id": f"message-{run_id}", "role": "user", "content": "go"}],
+        "tools": [],
         "system_context": {
             "version": version,
             "mode": "replace",
@@ -3250,6 +3257,7 @@ async def test_runtime_run_pins_one_hour_prompt_cache_ttl():
             "model": "chat-test",
             "context": {"session_id": "session-run-ttl"},
             "messages": [{"id": "message-ttl", "role": "user", "content": "make an image"}],
+            "tools": [],
             "system_context": {
                 "version": version,
                 "mode": "replace",

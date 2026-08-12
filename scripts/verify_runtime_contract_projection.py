@@ -5,7 +5,17 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 from pathlib import Path
+
+from gateway.runtime_contract_models import (
+    decode_runtime_error,
+    decode_runtime_event,
+    decode_runtime_manifest,
+    decode_runtime_run_request,
+    decode_runtime_tool_request,
+    decode_runtime_tool_result,
+)
 
 
 SCHEMA_NAMES = (
@@ -17,6 +27,14 @@ SCHEMA_NAMES = (
     "tool-result.schema.json",
 )
 LOCAL_ROOT = Path(__file__).resolve().parents[1] / "gateway" / "contracts" / "runtime"
+FIXTURE_DECODERS = {
+    "error.json": decode_runtime_error,
+    "manifest.json": decode_runtime_manifest,
+    "run-request.json": decode_runtime_run_request,
+    "runtime-event.json": decode_runtime_event,
+    "tool-request.json": decode_runtime_tool_request,
+    "tool-result.json": decode_runtime_tool_result,
+}
 
 
 def bundle_digest(schema_dir: Path) -> str:
@@ -47,6 +65,22 @@ def verify_projection(canonical_root: Path) -> str:
     return canonical_digest
 
 
+def verify_golden_examples(canonical_root: Path) -> None:
+    examples = canonical_root / "v1" / "examples"
+    for fixture_name, decoder in FIXTURE_DECODERS.items():
+        valid_path = examples / "valid" / fixture_name
+        invalid_path = examples / "invalid" / fixture_name
+        try:
+            decoder(json.loads(valid_path.read_text(encoding="utf-8")))
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"valid Runtime fixture rejected: {fixture_name}") from exc
+        try:
+            decoder(json.loads(invalid_path.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            continue
+        raise ValueError(f"invalid Runtime fixture accepted: {fixture_name}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -58,6 +92,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         digest = verify_projection(args.canonical_root.resolve())
+        verify_golden_examples(args.canonical_root.resolve())
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
     print(digest)
