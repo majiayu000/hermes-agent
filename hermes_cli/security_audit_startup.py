@@ -206,13 +206,19 @@ def _network_listener_without_auth(config: Optional[dict]) -> list[str]:
         if isinstance(api, dict) and api.get("enabled"):
             extra = api.get("extra") or {}
             host = extra.get("host") or os.environ.get("API_SERVER_HOST", "127.0.0.1")
+            runtime_only = str(os.environ.get("HERMES_RUNTIME_DRIVER_ONLY", "")).strip().lower() in {"1", "true", "yes", "on"}
             key = extra.get("key") or os.environ.get("API_SERVER_KEY", "")
-            if is_network_accessible(str(host)) and not str(key).strip():
+            runtime_auth_missing = runtime_only and (
+                not os.environ.get("RUNTIME_DRIVER_SERVICE_TOKEN", "").strip()
+                or not os.environ.get("RUNTIME_CAPABILITY_PUBLIC_KEYS", "").strip()
+            )
+            if is_network_accessible(str(host)) and (runtime_auth_missing or (not runtime_only and not str(key).strip())):
+                auth_name = "runtime service identity/capability keys" if runtime_only else "API_SERVER_KEY"
                 findings.append(
                     f"OpenAI-compatible API server is network-accessible ({host}) "
-                    "with NO API_SERVER_KEY. It dispatches terminal-capable agent "
+                    f"with NO {auth_name}. It dispatches terminal-capable agent "
                     "work — an unauthenticated network endpoint is remote code "
-                    "execution. Set a strong API_SERVER_KEY."
+                    f"execution. Configure {auth_name}."
                 )
     except Exception:
         pass
