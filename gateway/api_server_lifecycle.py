@@ -8,6 +8,11 @@ from __future__ import annotations
 from gateway.api_server_shared import *
 from gateway.api_server_audit import request_audit_middleware
 from gateway.config import is_runtime_driver_only
+from gateway.runtime_capability_auth import (
+    RuntimeCapabilityConfig,
+    RuntimeCapabilityError,
+    RuntimeCapabilityVerifier,
+)
 
 
 class APIServerLifecycleMixin:
@@ -73,6 +78,7 @@ class APIServerLifecycleMixin:
         self._app.router.add_get("/healthz", self._handle_health)
         self._app.router.add_post("/v1/runtime/runs", self._handle_runtime_run)
         self._app.router.add_post("/v1/runtime/runs/{run_id}/tool-results", self._handle_runtime_tool_result)
+        self._app.router.add_post("/v1/runtime/runs/{run_id}/control-results", self._handle_runtime_control_result)
         self._app.router.add_post("/v1/runtime/runs/{run_id}/interrupt", self._handle_runtime_interrupt)
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
@@ -80,6 +86,7 @@ class APIServerLifecycleMixin:
         if not AIOHTTP_AVAILABLE:
             logger.warning("[%s] aiohttp not installed", self.name)
             return False
+        runtime_driver_only = is_runtime_driver_only()
 
         try:
             mws = [
@@ -113,10 +120,23 @@ class APIServerLifecycleMixin:
             if hasattr(sweep_task, "add_done_callback"):
                 sweep_task.add_done_callback(self._background_tasks.discard)
 
-            # Refuse to start without authentication. The API server can
+            # Runtime-driver-only mode uses a separate caller credential plus
+            # per-request Ed25519 capabilities. Refuse to expose the private
+            # execution surface unless both verifier inputs are valid.
+            if runtime_driver_only:
+                try:
+                    self._runtime_capability_verifier = RuntimeCapabilityVerifier(
+                        RuntimeCapabilityConfig.from_env()
+                    )
+                except RuntimeCapabilityError as exc:
+                    logger.error("[%s] Refusing to start: %s", self.name, exc)
+                    return False
+
+            # Refuse to start without authentication. The general API server can
             # dispatch terminal-capable agent work, so every deployment needs
-            # an explicit API_SERVER_KEY regardless of bind address.
-            if not self._api_key:
+            # an explicit API_SERVER_KEY regardless of bind address. Driver-only
+            # mode was already gated above and deliberately does not share it.
+            if not runtime_driver_only and not self._api_key:
                 logger.error(
                     "[%s] Refusing to start: API_SERVER_KEY is required for the API server, "
                     "including loopback-only binds on %s.",
@@ -128,7 +148,7 @@ class APIServerLifecycleMixin:
             # Ported from openclaw/openclaw#64586; entropy floor raised to 16 in
             # the June 2026 hermes-0day hardening (an 8-char key dispatching
             # terminal-capable agent work on a public bind is brute-forceable).
-            if is_network_accessible(self._host) and self._api_key:
+            if not runtime_driver_only and is_network_accessible(self._host) and self._api_key:
                 try:
                     from hermes_cli.auth import has_usable_secret
                     if not has_usable_secret(self._api_key, min_length=16):

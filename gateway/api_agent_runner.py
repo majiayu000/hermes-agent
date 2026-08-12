@@ -38,6 +38,7 @@ def run_agent_sync(
     agent_configurator: Any = None,
     agent_creation_overrides: dict[str, Any] | None = None,
     runtime_message_id: str | None = None,
+    runtime_auxiliary_egress: dict[str, dict[str, str]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, int]]:
     from gateway.session_context import clear_session_vars, set_session_vars
 
@@ -78,6 +79,7 @@ def run_agent_sync(
             async_delivery=False,
         )
     approval_token = None
+    runtime_auxiliary_token = None
     prompt_callbacks_enabled = bool(prompt_session_key and prompt_notify_callback)
 
     def _prompt(kind: str, payload: dict[str, Any], *, timeout: float) -> str:
@@ -112,6 +114,12 @@ def run_agent_sync(
         return _prompt("sudo", {"prompt": "Sudo password required"}, timeout=120)
 
     try:
+        if runtime_auxiliary_egress:
+            from agent.run_scoped_auxiliary import bind_run_scoped_auxiliary
+
+            runtime_auxiliary_token = bind_run_scoped_auxiliary(
+                runtime_auxiliary_egress
+            )
         if approval_session_key:
             from tools.approval import (
                 register_gateway_notify,
@@ -178,6 +186,10 @@ def run_agent_sync(
                 issue_or_refresh_sandbox_lease(db, effective_session_id, scope)
         return result, usage
     finally:
+        if runtime_auxiliary_token is not None:
+            from agent.run_scoped_auxiliary import reset_run_scoped_auxiliary
+
+            reset_run_scoped_auxiliary(runtime_auxiliary_token)
         if prompt_callbacks_enabled:
             from tools.clarify_gateway import clear_session
             from tools.terminal_tool import set_sudo_password_callback

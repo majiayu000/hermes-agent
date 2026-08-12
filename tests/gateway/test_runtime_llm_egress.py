@@ -6,6 +6,7 @@ import pytest
 
 from gateway.api_server_runtime import (
     _configure_run_llm_egress,
+    _runtime_auxiliary_llm_egress,
     _runtime_failure_code,
     _runtime_llm_egress,
 )
@@ -38,6 +39,27 @@ def test_runtime_llm_egress_validates_private_capability():
         )
 
 
+def test_runtime_vision_llm_egress_requires_exact_model_bound_capability():
+    value = {
+        **capability(),
+        "model": "qwen/qwen3-vl-235b-a22b-thinking",
+    }
+    assert _runtime_auxiliary_llm_egress(
+        value,
+        field_name="vision_llm_egress",
+    ) == value
+    with pytest.raises(ValueError, match="vision_llm_egress.model"):
+        _runtime_auxiliary_llm_egress(
+            {**capability(), "model": ""},
+            field_name="vision_llm_egress",
+        )
+    with pytest.raises(ValueError, match="vision_llm_egress must contain"):
+        _runtime_auxiliary_llm_egress(
+            {**value, "provider": "ambient"},
+            field_name="vision_llm_egress",
+        )
+
+
 def test_configure_run_llm_egress_rebuilds_run_scoped_client():
     value = capability()
     agent = SimpleNamespace(
@@ -55,6 +77,7 @@ def test_configure_run_llm_egress_rebuilds_run_scoped_client():
 
 def test_runtime_contract_and_billing_failure_are_account_aware():
     assert "llm_egress" in RUNTIME_CAPABILITIES
+    assert "vision_llm_egress" in RUNTIME_CAPABILITIES
     assert _runtime_failure_code({"error": 'HTTP 402: {"msg":"insufficient balance"}'}) == "insufficient_credits"
     envelope = runtime_error_envelope("insufficient_credits", support_id="run_1")
     assert envelope["code"] == "insufficient_credits"
@@ -92,3 +115,49 @@ def test_run_scoped_agent_creation_never_resolves_shared_credentials():
     shared_model.assert_not_called()
     assert agent_class.call_args.kwargs["api_key"] == runtime["api_key"]
     assert agent_class.call_args.kwargs["model"] == "zai-org/glm-5.2"
+
+
+@pytest.mark.asyncio
+async def test_run_scoped_vision_egress_never_falls_back_to_ambient_provider():
+    from agent import auxiliary_client
+    from agent.run_scoped_auxiliary import (
+        bind_run_scoped_auxiliary,
+        reset_run_scoped_auxiliary,
+    )
+
+    class _Completions:
+        async def create(self, **_kwargs):
+            raise RuntimeError("HTTP 402 payment required")
+
+    client = SimpleNamespace(
+        base_url="http://agent-orchestrator:8093/internal/llm/v1",
+        chat=SimpleNamespace(completions=_Completions()),
+    )
+    value = {
+        **capability(),
+        "model": "qwen/qwen3-vl-235b-a22b-thinking",
+    }
+    token = bind_run_scoped_auxiliary({"vision": value})
+    try:
+        with (
+            patch(
+                "agent.auxiliary_client.resolve_vision_provider_client",
+                return_value=("custom", client, value["model"]),
+            ) as resolver,
+            patch("agent.auxiliary_client._try_configured_fallback_chain") as configured_fallback,
+            patch("agent.auxiliary_client._try_main_agent_model_fallback") as main_fallback,
+        ):
+            with pytest.raises(RuntimeError, match="402"):
+                await auxiliary_client.async_call_llm(
+                    task="vision",
+                    messages=[{"role": "user", "content": "inspect"}],
+                )
+
+        assert resolver.call_args.kwargs["provider"] == "custom"
+        assert resolver.call_args.kwargs["model"] == value["model"]
+        assert resolver.call_args.kwargs["base_url"] == value["base_url"]
+        assert resolver.call_args.kwargs["api_key"] == value["grant"]
+        configured_fallback.assert_not_called()
+        main_fallback.assert_not_called()
+    finally:
+        reset_run_scoped_auxiliary(token)

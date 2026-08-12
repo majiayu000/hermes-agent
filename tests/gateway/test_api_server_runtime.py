@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -257,6 +258,7 @@ class _RuntimeAdapter(_TestRuntimeAdapter):
         assert agent._primary_runtime["compressor_model"] == "chat-test"
         assert agent._fallback_chain == []
         assert agent._fallback_model is None
+        assert agent._skip_mcp_refresh is True
         assert agent.valid_tool_names == {
             "ask_user_question",
             "image_analyze",
@@ -639,6 +641,49 @@ def test_runtime_image_tool_allows_remote_and_scopes_local_sources(tmp_path):
         }
     finally:
         runtime_module._SESSIONS.pop("agent_image", None)
+        session.loop.close()
+
+
+def test_runtime_bridge_rejects_ambient_hermes_tool():
+    queue = asyncio.Queue()
+    session = RuntimeBridgeSession(
+        "run_scoped_tools",
+        asyncio.new_event_loop(),
+        queue,
+        [{"name": "media.generate_video", "input_schema": {"type": "object"}}],
+        1_000,
+        "agent_scoped_tools",
+    )
+    agent = SimpleNamespace(tools=[], valid_tool_names=set())
+    session.bind_agent(agent, [{
+        "type": "function",
+        "function": {
+            "name": "skill_view",
+            "description": "",
+            "parameters": {"type": "object"},
+        },
+    }])
+    runtime_module._SESSIONS["agent_scoped_tools"] = session
+    try:
+        result = _runtime_tool_middleware(
+            tool_name="mcp_higgsfield_generate_video",
+            args={"params": "{}"},
+            session_id="agent_scoped_tools",
+            tool_call_id="ambient_call",
+            next_call=lambda _args: pytest.fail("ambient Hermes tool executed"),
+        )
+        assert json.loads(result) == {
+            "error": {
+                "code": "tool_not_available",
+                "message": (
+                    "Tool 'mcp_higgsfield_generate_video' is not available to "
+                    "this Run. Use only the authenticated platform Tool definitions."
+                ),
+                "retryable": False,
+            },
+        }
+    finally:
+        runtime_module._SESSIONS.pop("agent_scoped_tools", None)
         session.loop.close()
 
 
@@ -1441,13 +1486,11 @@ async def test_runtime_media_requires_exact_catalog_contract_before_submission()
         "call_generate",
     ))
     request = await queue.get()
-    assert request["payload"]["name"] == "media.model_catalog"
-    assert request["payload"]["arguments"] == {
-        "action": "get",
-        "model_id": "openai/gpt-image-2/text-to-image",
-    }
-    assert session.submit_result({
-        "call_id": request["payload"]["call_id"],
+    assert request["type"] == "runtime_control_request"
+    assert request["payload"]["kind"] == "model_contract.get"
+    assert request["payload"]["model"] == "openai/gpt-image-2/text-to-image"
+    assert session.submit_control_result({
+        "request_id": request["payload"]["request_id"],
         "ok": False,
         "error": {
             "code": "model_not_found",
@@ -1488,31 +1531,31 @@ async def test_runtime_media_uses_catalog_contract_and_rejects_domain_ratio_fiel
         "call_generate_bad",
     ))
     catalog_request = await queue.get()
-    assert catalog_request["payload"]["name"] == "media.model_catalog"
-    assert session.submit_result({
-        "call_id": catalog_request["payload"]["call_id"],
+    assert catalog_request["type"] == "runtime_control_request"
+    assert catalog_request["payload"]["kind"] == "model_contract.get"
+    assert catalog_request["payload"]["model"] == model
+    assert session.submit_control_result({
+        "request_id": catalog_request["payload"]["request_id"],
         "ok": True,
         "result": {
-            "selected_model": model,
-            "models": [{
-                "model": model,
-                "parameters": [
-                    {"name": "prompt", "type": "string", "required": True},
-                    {
-                        "name": "size",
-                        "type": "string",
-                        "required": False,
-                        "options": ["1024x1024", "1536x1024"],
-                        "description": "Arbitrary resolutions are supported as WIDTHxHEIGHT strings.",
-                    },
-                    {
-                        "name": "quality",
-                        "type": "string",
-                        "required": False,
-                        "options": ["low", "medium", "high"],
-                    },
-                ],
-            }],
+            "model": model,
+            "observed_schema_digest": "sha256:" + "a" * 64,
+            "parameters": [
+                {"name": "prompt", "type": "string", "required": True},
+                {
+                    "name": "size",
+                    "type": "string",
+                    "required": False,
+                    "options": ["1024x1024", "1536x1024"],
+                    "description": "Arbitrary resolutions are supported as WIDTHxHEIGHT strings.",
+                },
+                {
+                    "name": "quality",
+                    "type": "string",
+                    "required": False,
+                    "options": ["low", "medium", "high"],
+                },
+            ],
         },
     })
     invalid = json.loads(await invalid_call)
@@ -1873,6 +1916,102 @@ def _run_body(run_id: str, **extra):
     return body
 
 
+@pytest.mark.asyncio
+async def test_runtime_accepts_and_binds_orchestrator_vision_llm_egress():
+    captured = {}
+
+    class VisionEgressAdapter(_TestRuntimeAdapter):
+        def _check_auth(self, _request):
+            return None
+
+        async def _run_agent_bridge(self, **kwargs):
+            captured.update(kwargs["runtime_auxiliary_egress"]["vision"])
+            return {"final_response": "ok"}, {"total_tokens": 1}
+
+    adapter = VisionEgressAdapter()
+    app = web.Application()
+    app.router.add_post("/v1/runtime/runs", adapter._handle_runtime_run)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        vision_capability = {
+            "model": "qwen/qwen3-vl-235b-a22b-thinking",
+            "base_url": "http://agent-orchestrator:8093/internal/llm/v1",
+            "grant": "ueg_" + "v" * 43,
+            "expires_at": (
+                datetime.now(timezone.utc) + timedelta(minutes=5)
+            ).isoformat(),
+        }
+        response = await client.post(
+            "/v1/runtime/runs",
+            json=_run_body(
+                "run_vision_egress",
+                vision_llm_egress=vision_capability,
+            ),
+        )
+        assert response.status == 200
+        events = [json.loads(line) async for line in response.content]
+        assert events[-1]["type"] == "completed"
+        assert captured == vision_capability
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_run_scoped_main_egress_without_vision_grant_hides_ambient_vision_tools():
+    captured = {}
+
+    class NoVisionGrantAdapter(_TestRuntimeAdapter):
+        def _check_auth(self, _request):
+            return None
+
+        async def _run_agent_bridge(self, **kwargs):
+            runtime = kwargs["agent_creation_overrides"]["runtime_overrides"]
+            agent = SimpleNamespace(
+                tools=[
+                    {"type": "function", "function": {"name": "image_analyze"}},
+                    {"type": "function", "function": {"name": "video_analyze"}},
+                ],
+                valid_tool_names={"image_analyze", "video_analyze"},
+                model="chat-test",
+                provider=runtime["provider"],
+                api_key=runtime["api_key"],
+                base_url=runtime["base_url"],
+                api_mode=runtime["api_mode"],
+            )
+            kwargs["agent_configurator"](agent)
+            captured["tools"] = set(agent.valid_tool_names)
+            return {"final_response": "ok"}, {"total_tokens": 1}
+
+    adapter = NoVisionGrantAdapter()
+    app = web.Application()
+    app.router.add_post("/v1/runtime/runs", adapter._handle_runtime_run)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        main_capability = {
+            "base_url": "http://agent-orchestrator:8093/internal/llm/v1",
+            "grant": "ueg_" + "m" * 43,
+            "expires_at": (
+                datetime.now(timezone.utc) + timedelta(minutes=5)
+            ).isoformat(),
+        }
+        response = await client.post(
+            "/v1/runtime/runs",
+            json=_run_body(
+                "run_without_vision_grant",
+                llm_egress=main_capability,
+            ),
+        )
+        assert response.status == 200
+        events = [json.loads(line) async for line in response.content]
+        assert events[-1]["type"] == "completed"
+        assert "image_analyze" not in captured["tools"]
+        assert "video_analyze" not in captured["tools"]
+    finally:
+        await client.close()
+
+
 def _complete_test_run(adapter, body):
     async def _run():
         app = web.Application()
@@ -1891,6 +2030,194 @@ def _complete_test_run(adapter, body):
             await client.close()
 
     return _run
+
+
+@pytest.mark.asyncio
+async def test_runtime_rebootstrap_rebuilds_waiting_tool_turn_without_reexecution():
+    class RebootstrapAdapter(_TestRuntimeAdapter):
+        _api_key = ""
+
+        def _check_auth(self, _request):
+            return None
+
+        async def _run_agent_bridge(self, **kwargs):
+            agent = SimpleNamespace(
+                tools=[],
+                valid_tool_names=set(),
+                model="configured-model",
+            )
+            kwargs["agent_configurator"](agent)
+            assert agent._resume_from_tool_results is True
+            assert agent._retry_current_turn is False
+            assert kwargs["user_message"] == ""
+            history = kwargs["conversation_history"]
+            assert [message["role"] for message in history] == [
+                "user",
+                "assistant",
+                "tool",
+            ]
+            assert history[1]["tool_calls"] == [{
+                "id": "call_media",
+                "type": "function",
+                "function": {
+                    "name": "media.generate_image",
+                    "arguments": '{"prompt":"cat"}',
+                },
+            }]
+            assert history[2]["tool_call_id"] == "call_media"
+            assert "media.generate_image" in agent.valid_tool_names
+            return {"final_response": "recovered"}, {"total_tokens": 2}
+
+    adapter = RebootstrapAdapter()
+    status, events = await _complete_test_run(adapter, _run_body(
+        "rebootstrap_waiting",
+        intent="rebootstrap",
+        context={"session_id": "thread_rebootstrap_waiting"},
+        messages=[{
+            "id": "msg:rebootstrap:input:0",
+            "role": "user",
+            "content": "make an image",
+        }],
+        tools=[{
+            "name": "media.generate_image",
+            "description": "generate an image",
+            "input_schema": {"type": "object", "properties": {}},
+            "exposure": "deferred",
+        }],
+        recovery_tool_calls=[{
+            "tool_call_id": "call_media",
+            "tool_name": "media.generate_image",
+            "args": {"prompt": "cat"},
+        }],
+        tool_results=[{
+            "tool_call_id": "call_media",
+            "status": "succeeded",
+            "output": {"batch_status": "succeeded"},
+        }],
+    ))()
+
+    assert status == 200
+    assert events[-1]["type"] == "completed"
+    persisted = adapter.db.get_messages_as_conversation(
+        "thread_rebootstrap_waiting",
+    )
+    assert [message["role"] for message in persisted] == [
+        "user",
+        "assistant",
+        "tool",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_rebootstrap_without_tool_result_replays_last_user_once():
+    captured = {}
+
+    class RebootstrapAdapter(_TestRuntimeAdapter):
+        _api_key = ""
+
+        def _check_auth(self, _request):
+            return None
+
+        async def _run_agent_bridge(self, **kwargs):
+            agent = SimpleNamespace(
+                tools=[],
+                valid_tool_names=set(),
+                model="configured-model",
+            )
+            kwargs["agent_configurator"](agent)
+            captured["resume"] = agent._resume_from_tool_results
+            captured["history"] = kwargs["conversation_history"]
+            captured["user_message"] = kwargs["user_message"]
+            return {"final_response": "continued"}, {"total_tokens": 1}
+
+    status, events = await _complete_test_run(
+        RebootstrapAdapter(),
+        _run_body(
+            "rebootstrap_new_turn",
+            intent="rebootstrap",
+            context={"session_id": "thread_rebootstrap_new_turn"},
+            messages=[
+                {"id": "prior-user", "role": "user", "content": "first"},
+                {"id": "prior-assistant", "role": "assistant", "content": "done"},
+                {"id": "current-user", "role": "user", "content": "continue"},
+            ],
+        ),
+    )()
+
+    assert status == 200
+    assert events[-1]["type"] == "completed"
+    assert captured["resume"] is False
+    assert [message["role"] for message in captured["history"]] == [
+        "user",
+        "assistant",
+    ]
+    assert captured["user_message"] == "continue"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("recovery_tool_calls", "tool_results", "message"),
+    [
+        (
+            [{
+                "tool_call_id": "call_media",
+                "tool_name": "media.generate_image",
+                "args": {},
+            }],
+            [],
+            "exactly one tool call and result",
+        ),
+        (
+            [{
+                "tool_call_id": "call_media",
+                "tool_name": "platform.hidden",
+                "args": {},
+            }],
+            [{
+                "tool_call_id": "call_media",
+                "status": "succeeded",
+                "output": {},
+            }],
+            "not in the Run toolset",
+        ),
+        (
+            [{
+                "tool_call_id": "call_one",
+                "tool_name": "media.generate_image",
+                "args": {},
+            }],
+            [{
+                "tool_call_id": "call_two",
+                "status": "succeeded",
+                "output": {},
+            }],
+            "ids must match",
+        ),
+    ],
+)
+async def test_runtime_rebootstrap_rejects_unpaired_or_untrusted_recovery(
+    recovery_tool_calls,
+    tool_results,
+    message,
+):
+    adapter = _RuntimeAdapter()
+    status, payload = await _complete_test_run(adapter, _run_body(
+        "rebootstrap_invalid",
+        intent="rebootstrap",
+        context={"session_id": "thread_rebootstrap_invalid"},
+        tools=[{
+            "name": "media.generate_image",
+            "description": "generate an image",
+            "input_schema": {"type": "object", "properties": {}},
+            "exposure": "deferred",
+        }],
+        recovery_tool_calls=recovery_tool_calls,
+        tool_results=tool_results,
+    ))()
+
+    assert status == 422
+    assert message in payload["error"]["message"]
+    assert adapter.db.get_session("thread_rebootstrap_invalid") is None
 
 
 @pytest.mark.asyncio
@@ -3136,3 +3463,65 @@ async def test_runtime_interrupt_audit_line_carries_run_id(caplog):
     ]
     assert interrupt_lines, _audit_messages(caplog)
     assert "'run_id': 'run_audit_intr'" in interrupt_lines[-1]
+
+
+@pytest.mark.asyncio
+async def test_runtime_video_generation_resolves_private_contract_and_preserves_ratio():
+    queue = asyncio.Queue()
+    model = "bytedance/seedance-2.0/reference-to-video"
+    session = RuntimeBridgeSession(
+        "run_video_ratio",
+        asyncio.get_running_loop(),
+        queue,
+        [{"name": "media.generate_video", "input_schema": {"type": "object"}}],
+        10_000,
+        "agent_video_ratio",
+        _runtime_call_db(
+            "agent_video_ratio",
+            ("call_generate", "media.generate_video"),
+        ),
+    )
+    request_args = {
+        "requests": [{
+            "model": model,
+            "prompt": "brand motion test",
+            "duration": 5,
+            "ratio": "16:9",
+        }],
+    }
+    call = asyncio.create_task(asyncio.to_thread(
+        session.invoke_platform_tool,
+        "media.generate_video",
+        request_args,
+        "call_generate",
+    ))
+    contract_request = await queue.get()
+    assert contract_request["type"] == "runtime_control_request"
+    assert contract_request["payload"]["kind"] == "model_contract.get"
+    assert session.submit_control_result({
+        "request_id": contract_request["payload"]["request_id"],
+        "ok": True,
+        "result": {
+            "model": model,
+            "observed_schema_digest": "sha256:" + "a" * 64,
+            "parameters": [
+                {"name": "prompt", "type": "string", "required": True},
+                {"name": "duration", "type": "integer", "required": True},
+                {
+                    "name": "ratio",
+                    "type": "string",
+                    "required": False,
+                    "options": ["16:9", "4:3", "1:1"],
+                },
+            ],
+        },
+    })
+    tool_request = await queue.get()
+    assert tool_request["type"] == "tool_request"
+    assert tool_request["payload"]["arguments"]["requests"][0]["ratio"] == "16:9"
+    assert session.submit_result({
+        "call_id": "call_generate",
+        "ok": True,
+        "result": {"status": "queued"},
+    })
+    assert json.loads(await call) == {"status": "queued"}

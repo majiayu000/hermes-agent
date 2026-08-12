@@ -219,6 +219,137 @@ def retry_session_db_history(
     return list(history)
 
 
+def rebootstrap_session_db_history(
+    db: Any,
+    session_id: str,
+    *,
+    model: str,
+    system_prompt: str,
+    messages: list[dict[str, Any]],
+    recovery_tool_calls: Any,
+    tool_results: Any,
+    allowed_tool_names: set[str],
+) -> tuple[list[dict[str, Any]], bool]:
+    """Rebuild one missing Runtime session from platform-durable truth.
+
+    A normal rebootstrap seeds the canonical prefix and leaves the final user
+    message for the agent loop. A waiting-tool rebootstrap additionally
+    restores the exact assistant tool call before projecting its already
+    durable result. It never invokes the tool.
+    """
+    if not isinstance(recovery_tool_calls, list):
+        raise ValueError("recovery_tool_calls must be an array")
+    if not isinstance(tool_results, list):
+        raise ValueError("tool_results must be an array")
+    recovering_tool_result = bool(recovery_tool_calls or tool_results)
+    if recovering_tool_result and (
+        len(recovery_tool_calls) != 1 or len(tool_results) != 1
+    ):
+        raise ValueError(
+            "rebootstrap recovery requires exactly one tool call and result"
+        )
+
+    seed_messages = list(messages[:-1])
+    if recovering_tool_result:
+        call = recovery_tool_calls[0]
+        if not isinstance(call, dict) or set(call) != {
+            "tool_call_id",
+            "tool_name",
+            "args",
+        }:
+            raise ValueError("recovery_tool_calls contains an invalid call")
+        call_id = call.get("tool_call_id")
+        tool_name = call.get("tool_name")
+        args = call.get("args")
+        if (
+            not isinstance(call_id, str)
+            or not call_id.strip()
+            or len(call_id.strip()) > 512
+        ):
+            raise ValueError("recovery tool_call_id is invalid")
+        if (
+            not isinstance(tool_name, str)
+            or not tool_name.strip()
+            or len(tool_name.strip()) > 255
+            or tool_name.strip() not in allowed_tool_names
+        ):
+            raise ValueError("recovery tool_name is not in the Run toolset")
+        if not isinstance(args, dict):
+            raise ValueError("recovery tool args must be an object")
+        result = tool_results[0]
+        if (
+            not isinstance(result, dict)
+            or str(result.get("tool_call_id") or "").strip() != call_id.strip()
+        ):
+            raise ValueError("recovery tool call and result ids must match")
+        seed_messages = [
+            *messages,
+            {
+                "message_id": f"runtime-recovery:{call_id.strip()}",
+                "platform_message_id": f"runtime-recovery:{call_id.strip()}",
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": call_id.strip(),
+                        "type": "function",
+                        "function": {
+                            "name": tool_name.strip(),
+                            "arguments": json.dumps(
+                                args,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                        },
+                    }
+                ],
+            },
+        ]
+
+    seed_runtime_session(
+        db,
+        session_id,
+        model=model,
+        system_prompt=system_prompt,
+        messages=seed_messages,
+    )
+    try:
+        history = db.get_messages_as_conversation(
+            session_id,
+            include_ancestors=True,
+        )
+        if not isinstance(history, list) or any(
+            not isinstance(item, dict) for item in history
+        ):
+            raise RuntimeSessionStateError(
+                "runtime_history_conflict",
+                "SessionDB returned invalid Runtime history",
+                status=409,
+            )
+        if recovering_tool_result:
+            history = resume_session_db_history(
+                db,
+                session_id,
+                history,
+                tool_results,
+            )
+        return history, recovering_tool_result
+    except Exception as recovery_exc:
+        cleanup_exc: Exception | None = None
+        delete_session = getattr(db, "delete_session", None)
+        if callable(delete_session):
+            try:
+                delete_session(session_id)
+            except Exception as exc:
+                cleanup_exc = exc
+        if cleanup_exc is not None:
+            raise ExceptionGroup(
+                "Runtime rebootstrap and cleanup both failed",
+                [recovery_exc, cleanup_exc],
+            ) from recovery_exc
+        raise
+
+
 def seed_runtime_session(
     db: Any,
     session_id: str,
@@ -346,6 +477,7 @@ def load_runtime_session_history(
 __all__ = [
     "RuntimeSessionStateError",
     "load_runtime_session_history",
+    "rebootstrap_session_db_history",
     "retry_session_db_history",
     "resume_session_db_history",
     "runtime_history_tool_names",
