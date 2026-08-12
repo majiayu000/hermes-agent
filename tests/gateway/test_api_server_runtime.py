@@ -1734,6 +1734,30 @@ def test_failed_tool_result_projection_fails_closed(transport):
     assert "must-not-cross" not in json.dumps(projected)
 
 
+def test_failed_tool_result_projection_preserves_platform_diagnostics():
+    projected = _failed_tool_result_projection({
+        "ok": False,
+        "error": {
+            "code": "invalid_tool_arguments",
+            "message": "The request could not be completed.",
+            "retryable": False,
+            "reason": "invalid_tool_arguments",
+            "source": "tool",
+            "support_id": "run_support_1",
+        },
+    })
+    assert projected == {
+        "error": {
+            "code": "invalid_tool_arguments",
+            "message": "The request could not be completed.",
+            "retryable": False,
+            "reason": "invalid_tool_arguments",
+            "source": "tool",
+            "support_id": "run_support_1",
+        },
+    }
+
+
 @pytest.mark.asyncio
 async def test_runtime_bridge_preserves_terminal_platform_error_code():
     queue = asyncio.Queue()
