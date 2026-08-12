@@ -15,6 +15,7 @@ from gateway.runtime_contract_models import (
     decode_runtime_run_request,
     decode_runtime_tool_request,
     decode_runtime_tool_result,
+    encode_runtime_event,
 )
 
 
@@ -81,6 +82,86 @@ def verify_golden_examples(canonical_root: Path) -> None:
         raise ValueError(f"invalid Runtime fixture accepted: {fixture_name}")
 
 
+def verify_producer_run_requests(input_directory: Path) -> None:
+    paths = sorted(input_directory.glob("*.json"))
+    if not paths:
+        raise ValueError(f"no producer run requests in {input_directory}")
+    for path in paths:
+        try:
+            decode_runtime_run_request(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"producer run request rejected: {path.name}") from exc
+
+
+def emit_runtime_events(output_directory: Path) -> None:
+    output_directory.mkdir(parents=True, exist_ok=True)
+    error = {
+        "code": "provider_timeout",
+        "message": "The provider timed out.",
+        "retryable": True,
+    }
+    events = {
+        "run-started.json": {
+            "run_id": "run_matrix",
+            "type": "run_started",
+            "payload": {
+                "runtime": "hermes",
+                "system_context_version": "matrix/v1",
+                "system_context_mode": "replace",
+                "system_context_digest": "sha256:" + "a" * 64,
+            },
+        },
+        "heartbeat.json": {"run_id": "run_matrix", "type": "heartbeat", "payload": {}},
+        "text-delta.json": {
+            "run_id": "run_matrix",
+            "type": "text_delta",
+            "payload": {"delta": "hello"},
+        },
+        "control-request.json": {
+            "run_id": "run_matrix",
+            "type": "runtime_control_request",
+            "payload": {
+                "request_id": "control_matrix",
+                "kind": "model_contract.get",
+                "model": "text/test",
+            },
+        },
+        "tool-request.json": {
+            "run_id": "run_matrix",
+            "type": "tool_request",
+            "payload": {
+                "call_id": "call_matrix",
+                "name": "platform.test",
+                "arguments": {},
+                "skills": [],
+            },
+        },
+        "activity-started.json": {
+            "run_id": "run_matrix",
+            "type": "activity_started",
+            "payload": {"call_id": "call_local", "name": "web_search", "arguments": {}},
+        },
+        "activity-completed.json": {
+            "run_id": "run_matrix",
+            "type": "activity_completed",
+            "payload": {"call_id": "call_local", "name": "web_search", "status": "completed"},
+        },
+        "usage.json": {
+            "run_id": "run_matrix",
+            "type": "usage",
+            "payload": {"input_tokens": 1, "output_tokens": 1},
+        },
+        "completed.json": {
+            "run_id": "run_matrix",
+            "type": "completed",
+            "payload": {"finish_reason": "stop", "text": "done"},
+        },
+        "error.json": {"run_id": "run_matrix", "type": "error", "payload": error},
+    }
+    for name, event in events.items():
+        (output_directory / name).write_bytes(encode_runtime_event(event))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -89,10 +170,24 @@ def main() -> int:
         type=Path,
         help="Extracted canonical contracts/runtime directory",
     )
+    parser.add_argument(
+        "--producer-run-requests",
+        type=Path,
+        help="directory of real Orchestrator adapter request bytes",
+    )
+    parser.add_argument(
+        "--emit-runtime-events",
+        type=Path,
+        help="write bytes from Hermes' production event encoder",
+    )
     args = parser.parse_args()
     try:
         digest = verify_projection(args.canonical_root.resolve())
         verify_golden_examples(args.canonical_root.resolve())
+        if args.producer_run_requests:
+            verify_producer_run_requests(args.producer_run_requests.resolve())
+        if args.emit_runtime_events:
+            emit_runtime_events(args.emit_runtime_events.resolve())
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
     print(digest)

@@ -15,6 +15,7 @@ from gateway.runtime_contract_models import (
     decode_runtime_event,
     decode_runtime_run_request,
     decode_runtime_tool_result,
+    encode_runtime_event,
 )
 from scripts.verify_runtime_contract_projection import LOCAL_ROOT
 
@@ -116,3 +117,18 @@ def test_event_contract_failure_does_not_expose_payload():
         assert "tool_request" in str(failure.value)
     finally:
         loop.close()
+
+
+def test_runtime_event_encoder_reuses_strict_decoder():
+    encoded = encode_runtime_event({
+        "run_id": "run_fixture",
+        "type": "completed",
+        "payload": {"finish_reason": "stop", "text": "done"},
+    })
+    assert json.loads(encoded) == {
+        "run_id": "run_fixture",
+        "type": "completed",
+        "payload": {"finish_reason": "stop", "text": "done"},
+    }
+    with pytest.raises(ValidationError):
+        encode_runtime_event({"type": "future_frame", "payload": {}})

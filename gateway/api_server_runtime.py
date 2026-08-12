@@ -48,6 +48,7 @@ from gateway.runtime_contract_models import (
     decode_runtime_event,
     decode_runtime_run_request,
     decode_runtime_tool_result,
+    encode_runtime_event,
 )
 from agent.tool_dispatch_helpers import DeferredToolResult
 from gateway.runtime_session_history import (
@@ -2388,14 +2389,7 @@ class APIServerRuntimeMixin:
                     ),
                 }
                 decode_runtime_event(conflict_event)
-                await response.write(
-                    json.dumps(
-                        conflict_event,
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
-                    + b"\n"
-                )
+                await response.write(encode_runtime_event(conflict_event) + b"\n")
                 if media_temp_dir is not None:
                     media_temp_dir.cleanup()
                 return response
@@ -2478,7 +2472,7 @@ class APIServerRuntimeMixin:
                 if event is None:
                     return
                 try:
-                    await response.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n")
+                    await response.write(encode_runtime_event(event) + b"\n")
                 except Exception as exc:
                     # The orchestrator went away; without an interrupt the
                     # agent keeps running and events pile into the queue.
