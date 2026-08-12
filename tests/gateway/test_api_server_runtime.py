@@ -39,6 +39,7 @@ from gateway.api_server_runtime import (
     _runtime_image_paths,
     _runtime_allowed_skill_names,
     _runtime_skill_projections,
+    _runtime_history_tool_names,
     _runtime_video_paths,
     _runtime_tool_middleware,
     _runtime_verified_activity_prompt,
@@ -1533,6 +1534,48 @@ def test_runtime_same_turn_retry_requires_user_or_tool_tail():
         _retry_session_db_history(
             [*history, {"role": "assistant", "content": "finished"}],
         )
+
+
+def test_runtime_retry_removes_only_local_interruption_marker():
+    history = [
+        {"role": "user", "content": "make a video"},
+        {"role": "tool", "content": "temporary local result"},
+        {
+            "role": "assistant",
+            "content": "Operation interrupted: waiting for model response (0.6s elapsed).",
+        },
+    ]
+    assert _retry_session_db_history(history) == history[:-1]
+    with pytest.raises(RuntimeSessionStateError, match="must end with user or tool"):
+        _retry_session_db_history([
+            *history[:-1],
+            {"role": "assistant", "content": "A real assistant response"},
+        ])
+
+
+def test_runtime_history_restores_deferred_tools_loaded_by_tool_search():
+    history = [
+        {
+            "role": "assistant",
+            "tool_calls": [{
+                "id": "search_1",
+                "function": {"name": "tool_search", "arguments": "{}"},
+            }],
+        },
+        {
+            "role": "tool",
+            "tool_name": "tool_search",
+            "tool_call_id": "search_1",
+            "content": json.dumps({
+                "loaded_tools": ["media.generate_video", "media.estimate_cost"],
+            }),
+        },
+    ]
+    assert _runtime_history_tool_names(history) == {
+        "tool_search",
+        "media.generate_video",
+        "media.estimate_cost",
+    }
 
 
 @pytest.mark.asyncio

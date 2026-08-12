@@ -16,16 +16,32 @@ class RuntimeSessionStateError(RuntimeError):
 
 
 def runtime_history_tool_names(history: list[dict[str, Any]]) -> set[str]:
-    """Return every tool name that has appeared in authoritative history."""
+    """Return every used or durably discovered tool name in history."""
     names: set[str] = set()
     for message in history:
-        if not isinstance(message, dict) or message.get("role") != "assistant":
+        if not isinstance(message, dict):
             continue
-        for call in message.get("tool_calls") or []:
-            function = call.get("function") if isinstance(call, dict) else None
-            name = str(function.get("name") or "") if isinstance(function, dict) else ""
-            if name:
-                names.add(name)
+        if message.get("role") == "assistant":
+            for call in message.get("tool_calls") or []:
+                function = call.get("function") if isinstance(call, dict) else None
+                name = str(function.get("name") or "") if isinstance(function, dict) else ""
+                if name:
+                    names.add(name)
+            continue
+        if message.get("role") != "tool" or message.get("tool_name") != "tool_search":
+            continue
+        try:
+            search_result = json.loads(str(message.get("content") or ""))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        loaded_tools = search_result.get("loaded_tools") if isinstance(search_result, dict) else None
+        if not isinstance(loaded_tools, list):
+            continue
+        names.update(
+            name.strip()
+            for value in loaded_tools
+            if isinstance(value, str) and (name := value.strip())
+        )
     return names
 
 
@@ -204,19 +220,30 @@ def retry_session_db_history(
     so an eligible retry resumes from the existing user/tool tail without
     inserting a synthetic user message.
     """
-    if not history or not isinstance(history[-1], dict):
+    retry_history = list(history)
+    if retry_history and _is_local_interruption_marker(retry_history[-1]):
+        retry_history.pop()
+    if not retry_history or not isinstance(retry_history[-1], dict):
         raise RuntimeSessionStateError(
             "runtime_history_conflict",
             "same-turn retry requires existing SessionDB history",
             status=409,
         )
-    if history[-1].get("role") not in {"user", "tool"}:
+    if retry_history[-1].get("role") not in {"user", "tool"}:
         raise RuntimeSessionStateError(
             "runtime_history_conflict",
             "same-turn retry history must end with user or tool state",
             status=409,
         )
-    return list(history)
+    return retry_history
+
+
+def _is_local_interruption_marker(message: dict[str, Any]) -> bool:
+    """Identify the deterministic assistant marker written by local interrupts."""
+    if message.get("role") != "assistant" or message.get("tool_calls"):
+        return False
+    content = str(message.get("content") or "").strip()
+    return content.startswith("Operation interrupted: waiting for model response (")
 
 
 def seed_recovery_tool_call(
