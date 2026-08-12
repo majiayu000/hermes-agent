@@ -107,7 +107,8 @@ _FAILED_ALLOWED_FIELDS = (
     | _FAILED_ALLOWED_INTEGER_LIST_FIELDS
     | _FAILED_ALLOWED_INTEGER_FIELDS
 )
-_FAILED_ERROR_FIELDS = {"code", "message", "retryable"}
+_FAILED_REQUIRED_ERROR_FIELDS = {"code", "message", "retryable"}
+_FAILED_OPTIONAL_ERROR_FIELDS = {"reason", "source", "support_id"}
 _TERMINAL_PLATFORM_ERROR_CODES = {
     "auth_rejected",
     "configuration_error",
@@ -450,7 +451,11 @@ def _failed_tool_result_projection(transport: Any) -> dict[str, Any]:
     ):
         return _invalid_failed_tool_result()
     error = transport.get("error")
-    if not isinstance(error, dict) or set(error) != _FAILED_ERROR_FIELDS:
+    if (
+        not isinstance(error, dict)
+        or not _FAILED_REQUIRED_ERROR_FIELDS.issubset(error)
+        or set(error) - _FAILED_REQUIRED_ERROR_FIELDS - _FAILED_OPTIONAL_ERROR_FIELDS
+    ):
         return _invalid_failed_tool_result()
     code = error.get("code")
     message = error.get("message")
@@ -472,6 +477,13 @@ def _failed_tool_result_projection(transport: Any) -> dict[str, Any]:
             "retryable": retryable,
         },
     }
+    for field in _FAILED_OPTIONAL_ERROR_FIELDS:
+        value = error.get(field)
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.strip() or len(value) > 512:
+            return _invalid_failed_tool_result()
+        projection["error"][field] = value
     if "result" not in transport:
         return projection
     result = transport.get("result")
