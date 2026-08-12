@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ultrastudio.ai/contracts/runtime/v1/tool-request.schema.json",
+  "title": "Ultra Studio Runtime Tool Request Payload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["call_id", "name", "arguments", "skills"],
+  "properties": {
+    "call_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255
+    },
+    "arguments": {
+      "type": "object"
+    },
+    "skills": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "digest"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          }
+        }
+      }
+    }
+  },
+  "x-ultra-contract": {
+    "name": "ultra.runtime.tool-request",
+    "major": 1,
+    "minor": 0
+  }
+}

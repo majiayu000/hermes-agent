@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ultrastudio.ai/contracts/runtime/v1/manifest.schema.json",
+  "title": "Ultra Studio Runtime Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["runtime", "runtime_build", "contract", "intents", "features", "limits"],
+  "properties": {
+    "runtime": {
+      "const": "hermes"
+    },
+    "runtime_build": {
+      "type": "string",
+      "pattern": "^git:[0-9a-f]{40}$"
+    },
+    "contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["major", "min_minor", "max_minor", "schema_digests"],
+      "properties": {
+        "major": {
+          "const": 1
+        },
+        "min_minor": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_minor": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "schema_digests": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    "intents": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": ["bootstrap", "new_turn", "resume", "retry", "rebootstrap"]
+      }
+    },
+    "features": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_.-]+\\.v[1-9][0-9]*$"
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_request_bytes", "max_tool_result_bytes"],
+      "properties": {
+        "max_request_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_tool_result_bytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  },
+  "x-ultra-contract": {
+    "name": "ultra.runtime.manifest",
+    "major": 1,
+    "minor": 0
+  }
+}

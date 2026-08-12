@@ -1,6 +1,7 @@
 from gateway.runtime_contract import (
     RUNTIME_CONTRACT_MAJOR,
     RUNTIME_CONTRACT_MINOR,
+    RUNTIME_CONTRACT_SCHEMA_DIGEST,
     RUNTIME_DRIVER_FRAME_TYPES,
     RUNTIME_PROTOCOL_VERSION,
     RUNTIME_RUN_REQUEST_SCHEMA_DIGEST,
@@ -37,7 +38,7 @@ def test_runtime_manifest_contract_is_negotiable_and_contains_real_limits():
             "major": RUNTIME_CONTRACT_MAJOR,
             "min_minor": RUNTIME_CONTRACT_MINOR,
             "max_minor": RUNTIME_CONTRACT_MINOR,
-            "schema_digests": [RUNTIME_RUN_REQUEST_SCHEMA_DIGEST],
+            "schema_digests": [RUNTIME_CONTRACT_SCHEMA_DIGEST],
         },
         "intents": ["bootstrap", "new_turn", "resume", "retry", "rebootstrap"],
         "features": [
@@ -53,6 +54,9 @@ def test_runtime_manifest_contract_is_negotiable_and_contains_real_limits():
     }
     assert RUNTIME_RUN_REQUEST_SCHEMA_DIGEST.startswith("sha256:")
     assert len(RUNTIME_RUN_REQUEST_SCHEMA_DIGEST) == len("sha256:") + 64
+    assert RUNTIME_CONTRACT_SCHEMA_DIGEST.startswith("sha256:")
+    assert len(RUNTIME_CONTRACT_SCHEMA_DIGEST) == len("sha256:") + 64
+    assert RUNTIME_CONTRACT_SCHEMA_DIGEST != RUNTIME_RUN_REQUEST_SCHEMA_DIGEST
 
 
 def test_runtime_error_envelope_never_includes_raw_exception_text():

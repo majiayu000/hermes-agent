@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ultrastudio.ai/contracts/runtime/v1/runtime-event.schema.json",
+  "title": "Ultra Studio Runtime NDJSON Event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["type", "payload"],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "type": {
+      "enum": [
+        "run_started",
+        "heartbeat",
+        "text_delta",
+        "runtime_control_request",
+        "tool_request",
+        "activity_started",
+        "activity_completed",
+        "usage",
+        "completed",
+        "error"
+      ]
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"type": {"const": "run_started"}},
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["runtime", "system_context_version", "system_context_mode", "system_context_digest"],
+            "properties": {
+              "runtime": {"const": "hermes"},
+              "system_context_version": {"type": "string", "minLength": 1},
+              "system_context_mode": {"const": "replace"},
+              "system_context_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"type": {"const": "heartbeat"}},
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "maxProperties": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"type": {"const": "text_delta"}},
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["delta"],
+            "properties": {
+              "delta": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"type": {"const": "runtime_control_request"}},
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["request_id", "kind", "model"],
+            "properties": {
+              "request_id": {"type": "string", "minLength": 1, "maxLength": 128},
+              "kind": {"const": "model_contract.get"},
+              "model": {"type": "string", "minLength": 1, "maxLength": 512}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"type": {"const": "tool_request"}},
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "tool-request.schema.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"type": {"const": "activity_started"}},
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["call_id", "name", "arguments"],
+            "properties": {
+              "call_id": {"type": "string", "minLength": 1, "maxLength": 512},
+              "name": {"type": "string", "minLength": 1, "maxLength": 255},
+              "arguments": {"type": "object"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"type": {"const": "activity_completed"}},
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["call_id", "name", "status"],
+            "properties": {
+              "call_id": {"type": "string", "minLength": 1, "maxLength": 512},
+              "name": {"type": "string", "minLength": 1, "maxLength": 255},
+              "status": {"enum": ["completed", "failed"]},
+              "arguments": {"type": "object"},
+              "error": {"$ref": "error.schema.json"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"type": {"const": "usage"}},
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {"type": "object"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"type": {"const": "completed"}},
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["finish_reason", "text"],
+            "properties": {
+              "finish_reason": {"const": "stop"},
+              "text": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"type": {"const": "error"}},
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {"$ref": "error.schema.json"}
+        }
+      }
+    }
+  ],
+  "x-ultra-contract": {
+    "name": "ultra.runtime.runtime-event",
+    "major": 1,
+    "minor": 0
+  }
+}
