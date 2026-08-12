@@ -1,0 +1,267 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ultrastudio.ai/contracts/runtime/v1/run-request.schema.json",
+  "title": "Ultra Studio Runtime Run Request",
+  "description": "Canonical top-level wire contract owned by Agent Orchestrator. Consumer copies are generated projections.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "model",
+    "intent",
+    "messages",
+    "tools",
+    "system_context",
+    "context"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "intent": {
+      "enum": [
+        "bootstrap",
+        "new_turn",
+        "resume",
+        "retry",
+        "rebootstrap"
+      ]
+    },
+    "messages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "role",
+          "content"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "role": {
+            "enum": [
+              "user",
+              "assistant",
+              "tool"
+            ]
+          },
+          "content": {}
+        }
+      }
+    },
+    "tools": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "system_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "mode",
+        "stable",
+        "digest"
+      ],
+      "properties": {
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mode": {
+          "const": "replace"
+        },
+        "stable": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    },
+    "tool_results": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session_id"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    },
+    "runtime_context": {
+      "type": "object"
+    },
+    "artifact_manifest": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "attachment_references": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "attachments": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "skill_manifest": {
+      "type": "object"
+    },
+    "run_state": {
+      "type": "object"
+    },
+    "deadline_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "llm_egress": {
+      "$ref": "#/$defs/llmEgress"
+    },
+    "vision_llm_egress": {
+      "$ref": "#/$defs/auxiliaryLlmEgress"
+    },
+    "retry_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attempt",
+        "previous_error_code"
+      ],
+      "properties": {
+        "attempt": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "previous_error_code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    },
+    "recovery_tool_calls": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tool_call_id",
+          "tool_name",
+          "args"
+        ],
+        "properties": {
+          "tool_call_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "tool_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "args": {
+            "type": "object"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "llmEgress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "base_url",
+        "grant",
+        "expires_at"
+      ],
+      "properties": {
+        "base_url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "grant": {
+          "type": "string",
+          "pattern": "^ueg_[A-Za-z0-9_-]{43}$"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "auxiliaryLlmEgress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "base_url",
+        "grant",
+        "expires_at"
+      ],
+      "properties": {
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "base_url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "grant": {
+          "type": "string",
+          "pattern": "^ueg_[A-Za-z0-9_-]{43}$"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  },
+  "x-ultra-contract": {
+    "name": "ultra.runtime.run-request",
+    "major": 1,
+    "minor": 0,
+    "features": [
+      "llm_egress.v1",
+      "session_db_rebootstrap.v1",
+      "tool_result_replay.v1",
+      "vision_llm_egress.v1"
+    ]
+  }
+}

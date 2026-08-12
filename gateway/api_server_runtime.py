@@ -39,7 +39,11 @@ from gateway.api_server_shared import (
     web,
 )
 from gateway.config import is_runtime_driver_only
-from gateway.runtime_contract import runtime_error_envelope
+from gateway.runtime_contract import (
+    RUNTIME_RUN_INTENTS,
+    RUNTIME_RUN_REQUEST_FIELDS,
+    runtime_error_envelope,
+)
 from agent.tool_dispatch_helpers import DeferredToolResult
 from gateway.runtime_session_history import (
     RuntimeSessionStateError as _RuntimeSessionStateError,
@@ -2067,28 +2071,7 @@ class APIServerRuntimeMixin:
             body = await request.json()
             if not isinstance(body, dict):
                 raise ValueError("request body must be an object")
-            supported_fields = {
-                "intent",
-                "run_id",
-                "model",
-                "messages",
-                "system_context",
-                "tools",
-                "tool_results",
-                "context",
-                "runtime_context",
-                "artifact_manifest",
-                "attachment_references",
-                "attachments",
-                "skill_manifest",
-                "run_state",
-                "deadline_ms",
-                "llm_egress",
-                "vision_llm_egress",
-                "retry_context",
-                "recovery_tool_calls",
-            }
-            if set(body) - supported_fields:
+            if set(body) - RUNTIME_RUN_REQUEST_FIELDS:
                 raise ValueError("request contains unsupported fields")
             llm_egress = _runtime_llm_egress(
                 body.get("llm_egress"),
@@ -2102,13 +2085,7 @@ class APIServerRuntimeMixin:
                 field_name="vision_llm_egress",
             )
             intent = body.get("intent")
-            if not isinstance(intent, str) or intent not in {
-                "bootstrap",
-                "new_turn",
-                "resume",
-                "retry",
-                "rebootstrap",
-            }:
+            if not isinstance(intent, str) or intent not in RUNTIME_RUN_INTENTS:
                 raise ValueError(
                     "intent must be bootstrap, new_turn, resume, retry, or rebootstrap"
                 )

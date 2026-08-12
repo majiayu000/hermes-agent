@@ -139,3 +139,25 @@ def test_runtime_capability_config_fails_closed_without_independent_inputs(monke
     monkeypatch.delenv("RUNTIME_CAPABILITY_PUBLIC_KEYS", raising=False)
     with pytest.raises(RuntimeCapabilityError):
         RuntimeCapabilityConfig.from_env()
+
+
+def test_runtime_service_identity_is_independent_from_operation_capability():
+    verifier = RuntimeCapabilityVerifier(
+        RuntimeCapabilityConfig(
+            service_token="runtime-service-test",
+            public_keys={},
+        )
+    )
+
+    class Request:
+        headers = {
+            "X-Ultra-Service-Authorization": "Bearer runtime-service-test",
+        }
+
+    verifier.verify_service_identity(Request())
+
+    Request.headers = {
+        "X-Ultra-Service-Authorization": "Bearer wrong-service",
+    }
+    with pytest.raises(RuntimeCapabilityError, match="service credential"):
+        verifier.verify_service_identity(Request())
