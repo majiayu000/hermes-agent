@@ -2144,6 +2144,25 @@ def test_failed_tool_result_projection_preserves_platform_diagnostics():
     }
 
 
+def test_failed_tool_result_projection_bounds_oversized_message_without_losing_code():
+    projected = _failed_tool_result_projection({
+        "ok": False,
+        "error": {
+            "code": "invalid_tool_arguments",
+            "message": "private-schema-detail" * 200,
+            "retryable": False,
+        },
+    })
+    assert projected == {
+        "error": {
+            "code": "invalid_tool_arguments",
+            "message": "platform tool failed with invalid_tool_arguments",
+            "retryable": False,
+        },
+    }
+    assert "private-schema-detail" not in json.dumps(projected)
+
+
 @pytest.mark.asyncio
 async def test_runtime_bridge_preserves_terminal_platform_error_code():
     queue = asyncio.Queue()

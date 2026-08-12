@@ -466,10 +466,11 @@ def _failed_tool_result_projection(transport: Any) -> dict[str, Any]:
         or len(code) > 128
         or not isinstance(message, str)
         or not message.strip()
-        or len(message) > 2_000
         or not isinstance(retryable, bool)
     ):
         return _invalid_failed_tool_result()
+    if len(message) > 2_000:
+        message = f"platform tool failed with {code}"
     projection: dict[str, Any] = {
         "error": {
             "code": code,
