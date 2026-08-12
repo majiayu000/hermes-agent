@@ -22,6 +22,7 @@ RUNTIME_CAPABILITIES = (
     "interrupt",
     "model_contract_control",
     "session_db_resume",
+    "session_db_rebootstrap/v1",
     "retry_current_turn/v1",
     "system_context.replace",
     "llm_egress",

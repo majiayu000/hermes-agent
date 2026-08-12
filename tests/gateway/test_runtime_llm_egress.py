@@ -67,6 +67,7 @@ def test_configure_run_llm_egress_rebuilds_run_scoped_client():
 def test_runtime_contract_and_billing_failure_are_account_aware():
     assert "llm_egress" in RUNTIME_CAPABILITIES
     assert "vision_llm_egress" in RUNTIME_CAPABILITIES
+    assert "session_db_rebootstrap/v1" in RUNTIME_CAPABILITIES
     assert _runtime_failure_code({"error": 'HTTP 402: {"msg":"insufficient balance"}'}) == "insufficient_credits"
     envelope = runtime_error_envelope("insufficient_credits", support_id="run_1")
     assert envelope["code"] == "insufficient_credits"
