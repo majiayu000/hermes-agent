@@ -4,6 +4,25 @@ Instructions for AI coding assistants and developers working on the hermes-agent
 
 **Never give up on the right solution.**
 
+## Repository Ownership and Publishing Boundary
+
+This checkout is the owner's customized Hermes fork. It is not an upstream
+contribution checkout.
+
+- The only writable and publishable repository for work from this checkout is
+  `https://github.com/majiayu000/hermes-agent.git`.
+- `https://github.com/NousResearch/hermes-agent.git` is read-only upstream
+  reference material. Fetching, comparing, or selectively integrating upstream
+  changes is allowed.
+- Never push branches, commits, or tags to `NousResearch/hermes-agent`, and
+  never open a pull request against that official repository from this
+  checkout.
+- Before publishing Hermes changes, inspect the exact remote and destination.
+  If the destination is not `majiayu000/hermes-agent`, stop instead of
+  publishing.
+- Dev images must be built from an exact commit already pushed to the owner's
+  fork. An upstream pull request is not part of this deployment workflow.
+
 ## What Hermes Is
 
 Hermes is a personal AI agent that runs the same agent core across a CLI, a
