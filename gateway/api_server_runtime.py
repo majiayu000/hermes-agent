@@ -73,6 +73,30 @@ _RUNTIME_NATIVE_TOOLS = frozenset({
 })
 _MAX_ARGUMENT_CORRECTIONS = 1
 _MODEL_SCHEMA_ENVELOPE_FIELDS = frozenset({"request_id", "model", "medias"})
+_MEDIA_ROLE_PARAMETER_ALIASES = {
+    "start_frame": ("first_frame", "first_frame_img", "image", "input_image"),
+    "end_frame": ("last_frame", "last_image", "end_image", "last_frame_img"),
+    "reference_video": (
+        "reference_videos",
+        "reference_video",
+        "videos",
+        "video",
+        "input_video",
+    ),
+    "audio": ("audio", "audio_url", "input_audio"),
+    "reference": ("reference_images", "reference_image", "images", "image", "input_image"),
+    "reference_image": ("reference_images", "reference_image", "images", "image", "input_image"),
+    "style_reference": ("reference_images", "reference_image", "images", "image", "input_image"),
+    "foundation_reference": ("reference_images", "reference_image", "images", "image", "input_image"),
+    "character_reference": ("reference_images", "reference_image", "images", "image", "input_image"),
+    "element_reference": ("reference_images", "reference_image", "images", "image", "input_image"),
+    "product_photo": ("reference_images", "reference_image", "images", "image", "input_image"),
+    "logo": ("reference_images", "reference_image", "images", "image", "input_image"),
+    "character_sheet": ("reference_images", "reference_image", "images", "image", "input_image"),
+    "storyboard": ("reference_images", "reference_image", "images", "image", "input_image"),
+    "user_upload": ("reference_images", "reference_image", "images", "image", "input_image"),
+    "parcel_photo": ("reference_images", "reference_image", "images", "image", "input_image"),
+}
 _FAILED_ALLOWED_STRING_FIELDS = {"media_type", "model", "provider"}
 _FAILED_ALLOWED_STRING_LIST_FIELDS = {"aspect_ratios", "resolutions"}
 _FAILED_ALLOWED_INTEGER_LIST_FIELDS = {"durations"}
@@ -533,6 +557,22 @@ def _arbitrary_image_size_is_valid(value: Any, description: str) -> bool:
     )
 
 
+def _model_parameter_is_supplied_by_medias(name: str, request: dict[str, Any]) -> bool:
+    """Return whether the platform medias envelope supplies one provider field."""
+    medias = request.get("medias")
+    if not isinstance(medias, list) or not medias:
+        return False
+    for media in medias:
+        if not isinstance(media, dict):
+            continue
+        role = str(media.get("role") or "").strip().lower()
+        if not role:
+            continue
+        if name == role or name in _MEDIA_ROLE_PARAMETER_ALIASES.get(role, ()):
+            return True
+    return False
+
+
 def _model_request_contract_error(
     tool_name: str,
     args: Any,
@@ -585,7 +625,11 @@ def _model_request_contract_error(
             }
         missing = sorted(
             name for name, parameter in contract.items()
-            if parameter["required"] and name not in request
+            if (
+                parameter["required"]
+                and name not in request
+                and not _model_parameter_is_supplied_by_medias(name, request)
+            )
         )
         if missing:
             return {

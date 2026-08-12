@@ -1785,6 +1785,61 @@ async def test_runtime_media_uses_private_contract_and_rejects_domain_ratio_fiel
 
 
 @pytest.mark.asyncio
+async def test_runtime_media_treats_platform_medias_as_required_provider_images():
+    queue = asyncio.Queue()
+    model = "bytedance/seedream-v5.0-pro/edit"
+    session = RuntimeBridgeSession(
+        "run_media_edit",
+        asyncio.get_running_loop(),
+        queue,
+        [{"name": "media.generate_image", "input_schema": {"type": "object"}}],
+        10_000,
+        "agent_media_edit",
+        _runtime_call_db(
+            "agent_media_edit",
+            ("call_generate_edit", "media.generate_image"),
+        ),
+    )
+    args = {
+        "requests": [{
+            "model": model,
+            "prompt": "Apply the locked style to @Image1",
+            "medias": [{"role": "reference", "value": "output_character"}],
+        }],
+    }
+    generated = asyncio.create_task(asyncio.to_thread(
+        session.invoke_platform_tool,
+        "media.generate_image",
+        args,
+        "call_generate_edit",
+    ))
+    contract_request = await queue.get()
+    assert contract_request["type"] == "runtime_control_request"
+    assert session.submit_control_result({
+        "request_id": contract_request["payload"]["request_id"],
+        "ok": True,
+        "result": {
+            "model": model,
+            "observed_schema_digest": "sha256:" + "b" * 64,
+            "parameters": [
+                {"name": "prompt", "type": "string", "required": True},
+                {"name": "images", "type": "array", "required": True},
+            ],
+        },
+    })
+    request = await queue.get()
+    forwarded = request["payload"]["arguments"]["requests"][0]
+    assert forwarded["medias"] == args["requests"][0]["medias"]
+    assert "images" not in forwarded
+    assert session.submit_result({
+        "call_id": "call_generate_edit",
+        "ok": True,
+        "result": {"delivery_status": "ready"},
+    })
+    assert json.loads(await generated) == {"delivery_status": "ready"}
+
+
+@pytest.mark.asyncio
 async def test_runtime_bridge_allows_one_corrected_argument_attempt_then_halts():
     queue = asyncio.Queue()
     session = RuntimeBridgeSession(
