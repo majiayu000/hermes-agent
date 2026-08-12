@@ -455,6 +455,7 @@ def test_runtime_attachment_parts_preserve_and_materialize_image_pixels(tmp_path
             f"image_url={image_path}. Keep this private runtime path out "
             "of the final answer.]"
         ),
+        "_runtime_reference_id": "asset_image",
         "_runtime_image_path": str(image_path),
     }, {
         "type": "image_url",
@@ -529,6 +530,7 @@ def test_runtime_attachment_parts_materialize_video_for_native_analysis(tmp_path
             "and include_transcript=true. "
             "Representative frames, when present, are supplementary rather than the source of truth.]"
         ),
+        "_runtime_reference_id": "asset_video",
         "_runtime_video_path": str(video_path),
     }]
 
@@ -557,13 +559,14 @@ def test_runtime_video_tool_is_scoped_to_materialized_attachment(tmp_path):
         1_000,
         "agent_video",
         allowed_video_paths={str(allowed)},
+        allowed_video_references={"output_video": str(allowed)},
     )
     runtime_module._SESSIONS["agent_video"] = session
     try:
         seen = []
         accepted = _runtime_tool_middleware(
             tool_name="video_analyze",
-            args={"video_url": str(allowed), "question": "Summarize it"},
+            args={"video_url": "output_video", "question": "Summarize it"},
             session_id="agent_video",
             tool_call_id="video_ok",
             next_call=lambda args: seen.append(args) or '{"success":true}',
@@ -599,6 +602,7 @@ def test_runtime_image_tool_allows_remote_and_scopes_local_sources(tmp_path):
         1_000,
         "agent_image",
         allowed_image_paths={str(allowed)},
+        allowed_image_references={"output_image": str(allowed)},
     )
     runtime_module._SESSIONS["agent_image"] = session
     try:
@@ -606,7 +610,7 @@ def test_runtime_image_tool_allows_remote_and_scopes_local_sources(tmp_path):
         accepted = _runtime_tool_middleware(
             tool_name="image_analyze",
             args={
-                "image_url": [str(allowed), "https://example.com/reference.png"],
+                "image_url": ["output_image", "https://example.com/reference.png"],
                 "question": "Compare them",
             },
             session_id="agent_image",
@@ -2781,12 +2785,16 @@ async def test_runtime_session_db_resume_projects_generated_output_after_durable
             assert "runtime_generated_media_context" not in persisted
             analyzed = _runtime_tool_middleware(
                 tool_name="image_analyze",
-                args={"image_url": image_path, "question": "Inspect the output"},
+                args={"image_url": "output_1", "question": "Inspect the output"},
                 session_id=kwargs["session_id"],
                 tool_call_id="inspect_generated_output",
-                next_call=lambda _args: '{"success":true,"analysis":"one image"}',
+                next_call=lambda tool_args: (
+                    captured.setdefault("analyze_args", tool_args)
+                    and '{"success":true,"analysis":"one image"}'
+                ),
             )
             assert json.loads(analyzed)["analysis"] == "one image"
+            assert captured["analyze_args"]["image_url"] == image_path
             return {"final_response": "one image ready"}, {"total_tokens": 1}
 
     adapter = GeneratedOutputAdapter()

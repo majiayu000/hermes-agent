@@ -764,6 +764,7 @@ def _runtime_attachment_parts(
                     f"image_url={image_path}. Keep this private runtime path out "
                     "of the final answer.]"
                 ),
+                "_runtime_reference_id": reference_id,
                 "_runtime_image_path": str(image_path),
             })
             parts.append({
@@ -794,6 +795,7 @@ def _runtime_attachment_parts(
                     "Representative frames, when present, "
                     "are supplementary rather than the source of truth.]"
                 ),
+                "_runtime_reference_id": reference_id,
                 "_runtime_video_path": str(video_path),
             })
             continue
@@ -815,6 +817,29 @@ def _runtime_video_paths(parts: list[dict[str, Any]]) -> list[Path]:
         for part in parts
         if isinstance(part, dict) and part.get("_runtime_video_path")
     ]
+
+
+def _runtime_reference_paths(
+    parts: list[dict[str, Any]],
+    path_key: str,
+) -> dict[str, str]:
+    references: dict[str, str] = {}
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        reference_id = str(part.get("_runtime_reference_id") or "").strip()
+        runtime_path = str(part.get(path_key) or "").strip()
+        if reference_id and runtime_path:
+            references[reference_id] = str(Path(runtime_path).resolve())
+    return references
+
+
+def _runtime_image_references(parts: list[dict[str, Any]]) -> dict[str, str]:
+    return _runtime_reference_paths(parts, "_runtime_image_path")
+
+
+def _runtime_video_references(parts: list[dict[str, Any]]) -> dict[str, str]:
+    return _runtime_reference_paths(parts, "_runtime_video_path")
 
 
 def _public_runtime_attachment_parts(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1302,6 +1327,11 @@ def _runtime_tool_middleware(**kwargs: Any) -> Any:
         if projection is not None:
             return view_skill(requested, projection, args)
     if tool_name == "image_analyze":
+        args = _rewrite_runtime_media_references(
+            args,
+            ("image_url", "image_paths"),
+            session.allowed_image_references,
+        )
         for source in _image_analysis_sources(args):
             parsed = urlparse(source)
             if parsed.scheme.lower() in {"http", "https"}:
@@ -1321,6 +1351,11 @@ def _runtime_tool_middleware(**kwargs: Any) -> Any:
             if resolved_path not in session.allowed_image_paths:
                 return _image_analysis_scope_error()
     if tool_name == "video_analyze":
+        args = _rewrite_runtime_media_references(
+            args,
+            ("video_url",),
+            session.allowed_video_references,
+        )
         requested_path = str(args.get("video_url") or "").strip()
         try:
             resolved_path = str(Path(requested_path).resolve(strict=True))
@@ -1332,6 +1367,24 @@ def _runtime_tool_middleware(**kwargs: Any) -> Any:
                 "error": "video_analyze may only read video attachments owned by this run.",
             })
     return next_call(args) if callable(next_call) else args
+
+
+def _rewrite_runtime_media_references(
+    args: dict[str, Any],
+    field_names: tuple[str, ...],
+    references: dict[str, str],
+) -> dict[str, Any]:
+    rewritten = dict(args)
+    for field_name in field_names:
+        value = rewritten.get(field_name)
+        if isinstance(value, str):
+            rewritten[field_name] = references.get(value.strip(), value)
+        elif isinstance(value, list):
+            rewritten[field_name] = [
+                references.get(item.strip(), item) if isinstance(item, str) else item
+                for item in value
+            ]
+    return rewritten
 
 
 def _image_analysis_sources(args: dict[str, Any]) -> list[str]:
@@ -1396,6 +1449,8 @@ class RuntimeBridgeSession:
         allowed_skill_projections: dict[str, RuntimeSkillProjection] | None = None,
         allowed_image_paths: set[str] | None = None,
         allowed_video_paths: set[str] | None = None,
+        allowed_image_references: dict[str, str] | None = None,
+        allowed_video_references: dict[str, str] | None = None,
     ) -> None:
         self.run_id = run_id
         self.agent_session_id = agent_session_id
@@ -1426,6 +1481,18 @@ class RuntimeBridgeSession:
         self.allowed_video_paths = {
             str(Path(path).resolve())
             for path in (allowed_video_paths or set())
+        }
+        self.allowed_image_references = {
+            reference_id: resolved_path
+            for reference_id, path in (allowed_image_references or {}).items()
+            if reference_id
+            and (resolved_path := str(Path(path).resolve())) in self.allowed_image_paths
+        }
+        self.allowed_video_references = {
+            reference_id: resolved_path
+            for reference_id, path in (allowed_video_references or {}).items()
+            if reference_id
+            and (resolved_path := str(Path(path).resolve())) in self.allowed_video_paths
         }
         self.deadline_seconds = max(0.001, deadline_ms / 1000) if deadline_ms > 0 else None
         self.local_activities: dict[str, str] = {}
@@ -2019,6 +2086,8 @@ class APIServerRuntimeMixin:
             )
             runtime_image_paths = _runtime_image_paths(attachment_parts)
             runtime_video_paths = _runtime_video_paths(attachment_parts)
+            runtime_image_references = _runtime_image_references(attachment_parts)
+            runtime_video_references = _runtime_video_references(attachment_parts)
             if attachment_parts and intent not in {"resume", "retry"}:
                 last_user_index = len(normalized_messages) - 1
                 if normalized_messages[last_user_index].get("role") != "user":
@@ -2121,6 +2190,8 @@ class APIServerRuntimeMixin:
             allowed_skill_projections=allowed_skill_projections,
             allowed_image_paths={str(path) for path in runtime_image_paths},
             allowed_video_paths={str(path) for path in runtime_video_paths},
+            allowed_image_references=runtime_image_references,
+            allowed_video_references=runtime_video_references,
         )
         _ensure_runtime_middleware()
         _ensure_session_sweeper()
