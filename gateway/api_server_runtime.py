@@ -39,6 +39,7 @@ from gateway.api_server_shared import (
     MAX_RUNTIME_ATTACHMENT_BYTES,
     web,
 )
+from gateway.config import is_runtime_driver_only
 from gateway.runtime_contract import runtime_error_envelope
 from agent.tool_dispatch_helpers import DeferredToolResult
 from gateway.runtime_session_history import (
@@ -2085,6 +2086,24 @@ class RuntimeBridgeSession:
 
 
 class APIServerRuntimeMixin:
+    async def _authenticate_runtime_request(self, request: "web.Request") -> "web.Response | None":
+        checker = getattr(self, "_check_runtime_auth", None)
+        if callable(checker):
+            return await checker(request)
+        # Small test adapters compose this mixin without APIServerCoreMixin.
+        # Driver-only production must never fall back to the general API key.
+        if is_runtime_driver_only():
+            return web.json_response(
+                {
+                    "error": {
+                        "code": "runtime_capability_unavailable",
+                        "message": "runtime capability verifier is unavailable",
+                    }
+                },
+                status=503,
+            )
+        return self._check_auth(request)
+
     async def _run_agent_bridge(self, **kwargs: Any) -> tuple:
         """Run one bridge conversation on the dedicated bounded runtime pool.
 
@@ -2102,7 +2121,7 @@ class APIServerRuntimeMixin:
         return await loop.run_in_executor(_runtime_executor(), _run)
 
     async def _handle_runtime_run(self, request: "web.Request") -> "web.StreamResponse":
-        auth_error = self._check_auth(request)
+        auth_error = await self._authenticate_runtime_request(request)
         if auth_error:
             return auth_error
         # Concurrency gate before response.prepare: over-limit requests are
@@ -2460,20 +2479,6 @@ class APIServerRuntimeMixin:
             agent._session_db_created = True
             agent.session_id = agent_session_id
             _configure_run_llm_egress(agent, llm_egress, body.get("model"))
-            if vision_llm_egress is not None:
-                from agent.auxiliary_client import set_runtime_auxiliary_override
-
-                set_runtime_auxiliary_override(
-                    "vision",
-                    provider="custom",
-                    model=vision_llm_egress["model"],
-                    base_url=vision_llm_egress["base_url"],
-                    api_key=vision_llm_egress["grant"],
-                )
-            else:
-                from agent.auxiliary_client import set_runtime_auxiliary_unavailable
-
-                set_runtime_auxiliary_unavailable("vision")
             _pin_run_model(agent, body.get("model"))
             # The Orchestrator owns the complete per-Run Tool grant. Hermes'
             # ordinary between-turn MCP refresh rebuilds from a process-global
@@ -2564,6 +2569,11 @@ class APIServerRuntimeMixin:
                     if llm_egress is not None
                     else None
                 ),
+                runtime_auxiliary_egress=(
+                    {"vision": vision_llm_egress}
+                    if vision_llm_egress is not None
+                    else None
+                ),
             )
             text = str((result or {}).get("final_response") or "")
             session.emit("usage", usage or {})
@@ -2605,7 +2615,7 @@ class APIServerRuntimeMixin:
         return response
 
     async def _handle_runtime_tool_result(self, request: "web.Request") -> "web.Response":
-        auth_error = self._check_auth(request)
+        auth_error = await self._authenticate_runtime_request(request)
         if auth_error:
             return auth_error
         run_id = request.match_info["run_id"]
@@ -2623,7 +2633,7 @@ class APIServerRuntimeMixin:
         return web.Response(status=204)
 
     async def _handle_runtime_control_result(self, request: "web.Request") -> "web.Response":
-        auth_error = self._check_auth(request)
+        auth_error = await self._authenticate_runtime_request(request)
         if auth_error:
             return auth_error
         run_id = request.match_info["run_id"]
@@ -2650,7 +2660,7 @@ class APIServerRuntimeMixin:
         return web.Response(status=204)
 
     async def _handle_runtime_interrupt(self, request: "web.Request") -> "web.Response":
-        auth_error = self._check_auth(request)
+        auth_error = await self._authenticate_runtime_request(request)
         if auth_error:
             return auth_error
         run_id = request.match_info["run_id"]

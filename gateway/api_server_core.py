@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from gateway.api_server_shared import *
 from gateway.api_server_audit import log_api_decision, request_id_headers
+from gateway.config import is_runtime_driver_only
 from gateway.principal_headers import parse_principal_scope_headers
 from gateway.runtime_provenance import (
     RuntimeProvenance,
@@ -16,6 +17,11 @@ from gateway.runtime_provenance import (
     collect_runtime_provenance,
 )
 from gateway.runtime_contract import runtime_health_contract
+from gateway.runtime_capability_auth import (
+    RuntimeCapabilityConfig,
+    RuntimeCapabilityError,
+    RuntimeCapabilityVerifier,
+)
 
 
 _API_SERVER_CLI_INHERITED_TOOLSETS = frozenset({"video_gen"})
@@ -115,6 +121,7 @@ class APIServerCoreMixin:
         self._inflight_agent_runs: int = 0
         self._runtime_started_at = datetime.now(timezone.utc)
         self._runtime_provenance: Optional[RuntimeProvenance] = None
+        self._runtime_capability_verifier: Optional[RuntimeCapabilityVerifier] = None
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -307,8 +314,9 @@ class APIServerCoreMixin:
         Validate Bearer token from Authorization header.
 
         Returns None if auth is OK, or a 401 web.Response on failure.
-        connect() refuses to start the API server without API_SERVER_KEY, so
-        the no-key branch only exists for tests or unsupported manual wiring.
+        General API mode refuses to start without API_SERVER_KEY. Ultra Studio
+        runtime-driver-only mode authenticates its private routes separately
+        with service identity plus an Ed25519 operation capability.
         """
         if not self._api_key:
             return None
@@ -335,6 +343,25 @@ class APIServerCoreMixin:
             status=401,
             headers=request_id_headers(request),
         )
+
+    async def _check_runtime_auth(self, request: "web.Request") -> Optional["web.Response"]:
+        """Authenticate the private runtime surface with a bound capability."""
+        if not is_runtime_driver_only():
+            return self._check_auth(request)
+        try:
+            if self._runtime_capability_verifier is None:
+                self._runtime_capability_verifier = RuntimeCapabilityVerifier(
+                    RuntimeCapabilityConfig.from_env()
+                )
+            request["runtime_capability"] = await self._runtime_capability_verifier.verify(request)
+            return None
+        except RuntimeCapabilityError as exc:
+            logger.warning("Runtime capability rejected: %s", exc)
+            return web.json_response(
+                {"error": {"message": "Invalid runtime capability", "type": "invalid_request_error", "code": "invalid_runtime_capability"}},
+                status=401,
+                headers=request_id_headers(request),
+            )
 
     # ------------------------------------------------------------------
     # Session header helpers

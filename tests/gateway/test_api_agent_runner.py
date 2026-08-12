@@ -181,3 +181,40 @@ def test_run_agent_sync_clears_context_after_turn(tmp_path):
 
     assert get_current_principal() is None
     assert get_current_sandbox_lease() is None
+
+
+def test_run_agent_sync_binds_and_clears_runtime_auxiliary_egress():
+    from agent.run_scoped_auxiliary import get_run_scoped_auxiliary
+
+    class RuntimeAgent:
+        session_prompt_tokens = 0
+        session_completion_tokens = 0
+        session_total_tokens = 0
+        session_id = "runtime-session"
+
+        def run_conversation(self, user_message, conversation_history, task_id):
+            return {
+                "final_response": "ok",
+                "vision": get_run_scoped_auxiliary("vision"),
+            }
+
+    class RuntimeAdapter:
+        def _create_agent(self, **_kwargs):
+            return RuntimeAgent()
+
+    capability = {
+        "model": "qwen/qwen3-vl-235b-a22b-thinking",
+        "base_url": "http://agent-orchestrator:8093/internal/llm/v1",
+        "grant": "ueg_" + "v" * 43,
+        "expires_at": "2099-01-01T00:00:00Z",
+    }
+    result, _usage = run_agent_sync(
+        RuntimeAdapter(),
+        user_message="runtime turn",
+        conversation_history=[],
+        session_id="runtime-session",
+        runtime_auxiliary_egress={"vision": capability},
+    )
+
+    assert result["vision"] == capability
+    assert get_run_scoped_auxiliary("vision") is None

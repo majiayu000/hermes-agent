@@ -5715,9 +5715,21 @@ def call_llm(
     Raises:
         RuntimeError: If no provider is configured.
     """
-    resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
-        task, provider, model, base_url, api_key)
-    effective_extra_body = _get_task_extra_body(task)
+    from agent.run_scoped_auxiliary import get_run_scoped_auxiliary
+
+    run_scoped_capability = get_run_scoped_auxiliary(task or "")
+    if run_scoped_capability is not None:
+        resolved_provider = "custom"
+        resolved_model = run_scoped_capability["model"]
+        resolved_base_url = run_scoped_capability["base_url"]
+        resolved_api_key = run_scoped_capability["grant"]
+        resolved_api_mode = "chat_completions"
+    else:
+        resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
+            task, provider, model, base_url, api_key)
+    effective_extra_body = (
+        {} if run_scoped_capability is not None else _get_task_extra_body(task)
+    )
     effective_extra_body.update(extra_body or {})
 
     if task == "vision":
@@ -6112,7 +6124,11 @@ def call_llm(
             or _is_model_incompatible_error(first_err)
             or _is_invalid_aux_response_error(first_err)
         )
-        if should_fallback and (is_auto or is_capacity_error):
+        if (
+            run_scoped_capability is None
+            and should_fallback
+            and (is_auto or is_capacity_error)
+        ):
             if _is_auth_error(first_err):
                 reason = "auth error"
             elif _is_payment_error(first_err):
@@ -6263,9 +6279,21 @@ async def async_call_llm(
 
     Same as call_llm() but async. See call_llm() for full documentation.
     """
-    resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
-        task, provider, model, base_url, api_key)
-    effective_extra_body = _get_task_extra_body(task)
+    from agent.run_scoped_auxiliary import get_run_scoped_auxiliary
+
+    run_scoped_capability = get_run_scoped_auxiliary(task or "")
+    if run_scoped_capability is not None:
+        resolved_provider = "custom"
+        resolved_model = run_scoped_capability["model"]
+        resolved_base_url = run_scoped_capability["base_url"]
+        resolved_api_key = run_scoped_capability["grant"]
+        resolved_api_mode = "chat_completions"
+    else:
+        resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
+            task, provider, model, base_url, api_key)
+    effective_extra_body = (
+        {} if run_scoped_capability is not None else _get_task_extra_body(task)
+    )
     effective_extra_body.update(extra_body or {})
 
     if task == "vision":
@@ -6591,7 +6619,11 @@ async def async_call_llm(
             or _is_model_incompatible_error(first_err)
             or _is_invalid_aux_response_error(first_err)
         )
-        if should_fallback and (is_auto or is_capacity_error):
+        if (
+            run_scoped_capability is None
+            and should_fallback
+            and (is_auto or is_capacity_error)
+        ):
             if _is_auth_error(first_err):
                 reason = "auth error"
             elif _is_payment_error(first_err):
