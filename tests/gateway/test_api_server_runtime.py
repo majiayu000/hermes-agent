@@ -1907,6 +1907,115 @@ async def test_runtime_media_requires_exact_private_contract_before_submission(t
 
 
 @pytest.mark.asyncio
+async def test_runtime_media_presents_new_model_contract_before_paid_submission():
+    queue = asyncio.Queue()
+    model = "bytedance/seedance-2.0/reference-to-video"
+    session = RuntimeBridgeSession(
+        "run_media_schema_preflight",
+        asyncio.get_running_loop(),
+        queue,
+        [{"name": "media.generate_video", "input_schema": {"type": "object"}}],
+        10_000,
+        "agent_media_schema_preflight",
+        _runtime_call_db(
+            "agent_media_schema_preflight",
+            ("call_generate", "media.generate_video"),
+            ("call_generate_after_preflight", "media.generate_video"),
+        ),
+    )
+    call = asyncio.create_task(asyncio.to_thread(
+        session.invoke_platform_tool,
+        "media.generate_video",
+        {
+            "requests": [{
+                "model": model,
+                "prompt": "A 15-second kinetic reel",
+                "medias": [{"role": "storyboard", "value": "output_storyboard"}],
+            }],
+        },
+        "call_generate",
+    ))
+    contract_request = await queue.get()
+    assert contract_request["type"] == "runtime_control_request"
+    assert session.submit_control_result({
+        "request_id": contract_request["payload"]["request_id"],
+        "ok": True,
+        "result": {
+            "model": model,
+            "observed_schema_digest": "sha256:" + "a" * 64,
+            "parameters": [
+                {"name": "prompt", "type": "string", "required": False},
+                {
+                    "name": "duration",
+                    "type": "integer",
+                    "required": False,
+                    "default": 5,
+                    "options": [5, 15],
+                    "description": "Video duration in seconds.",
+                },
+                {"name": "images", "type": "array", "required": True},
+            ],
+        },
+    })
+
+    result = json.loads(await call)
+    assert result["error"] == {
+        "code": "model_schema_required",
+        "message": (
+            "Exact model parameters are now available. Reconcile every explicit "
+            "workflow value with the provider defaults before retrying; prompt prose "
+            "does not override omitted literal parameters."
+        ),
+        "retryable": True,
+    }
+    assert result["recovery"] == {"action": "reconcile_model_parameters"}
+    assert result["model_contracts"] == [{
+        "model": model,
+        "parameters": [
+            {
+                "name": "duration",
+                "type": "integer",
+                "required": False,
+                "default": 5,
+                "options": [5, 15],
+                "description": "Video duration in seconds.",
+            },
+            {
+                "name": "prompt",
+                "type": "string",
+                "required": False,
+                "options": [],
+                "description": "",
+            },
+        ],
+    }]
+    assert queue.empty()
+
+    generated = asyncio.create_task(asyncio.to_thread(
+        session.invoke_platform_tool,
+        "media.generate_video",
+        {
+            "requests": [{
+                "model": model,
+                "prompt": "A 15-second kinetic reel",
+                "duration": 15,
+                "medias": [{"role": "storyboard", "value": "output_storyboard"}],
+            }],
+        },
+        "call_generate_after_preflight",
+    ))
+    request = await queue.get()
+    assert request["type"] == "tool_request"
+    assert request["payload"]["arguments"]["requests"][0]["duration"] == 15
+    assert session.submit_result({
+        "call_id": "call_generate_after_preflight",
+        "ok": True,
+        "result": {"delivery_status": "ready"},
+    })
+    assert json.loads(await generated) == {"delivery_status": "ready"}
+
+
+@pytest.mark.asyncio
 async def test_runtime_media_uses_private_contract_and_rejects_domain_ratio_field():
     queue = asyncio.Queue()
     model = "openai/gpt-image-2/text-to-image"
@@ -1919,15 +2028,16 @@ async def test_runtime_media_uses_private_contract_and_rejects_domain_ratio_fiel
         "agent_media_schema",
         _runtime_call_db(
             "agent_media_schema",
+            ("call_generate_preflight", "media.generate_image"),
             ("call_generate_bad", "media.generate_image"),
             ("call_generate_good", "media.generate_image"),
         ),
     )
-    invalid_call = asyncio.create_task(asyncio.to_thread(
+    preflight_call = asyncio.create_task(asyncio.to_thread(
         session.invoke_platform_tool,
         "media.generate_image",
         {"requests": [{"model": model, "prompt": "poster", "aspect_ratio": "3:2"}]},
-        "call_generate_bad",
+        "call_generate_preflight",
     ))
     contract_request = await queue.get()
     assert contract_request["type"] == "runtime_control_request"
@@ -1957,6 +2067,16 @@ async def test_runtime_media_uses_private_contract_and_rejects_domain_ratio_fiel
             ],
         },
     })
+    preflight = json.loads(await preflight_call)
+    assert preflight["error"]["code"] == "model_schema_required"
+    assert queue.empty()
+
+    invalid_call = asyncio.create_task(asyncio.to_thread(
+        session.invoke_platform_tool,
+        "media.generate_image",
+        {"requests": [{"model": model, "prompt": "poster", "aspect_ratio": "3:2"}]},
+        "call_generate_bad",
+    ))
     invalid = json.loads(await invalid_call)
     assert invalid["error"]["code"] == "invalid_tool_arguments"
     assert "aspect_ratio" in invalid["error"]["message"]
@@ -1991,6 +2111,7 @@ async def test_runtime_media_treats_platform_moodboard_as_required_provider_imag
         "agent_media_edit",
         _runtime_call_db(
             "agent_media_edit",
+            ("call_preflight_edit", "media.generate_image"),
             ("call_generate_edit", "media.generate_image"),
         ),
     )
@@ -2001,11 +2122,11 @@ async def test_runtime_media_treats_platform_moodboard_as_required_provider_imag
             "medias": [{"role": "moodboard", "value": "output_character"}],
         }],
     }
-    generated = asyncio.create_task(asyncio.to_thread(
+    preflight_call = asyncio.create_task(asyncio.to_thread(
         session.invoke_platform_tool,
         "media.generate_image",
         args,
-        "call_generate_edit",
+        "call_preflight_edit",
     ))
     contract_request = await queue.get()
     assert contract_request["type"] == "runtime_control_request"
@@ -2021,6 +2142,16 @@ async def test_runtime_media_treats_platform_moodboard_as_required_provider_imag
             ],
         },
     })
+    preflight = json.loads(await preflight_call)
+    assert preflight["error"]["code"] == "model_schema_required"
+    assert queue.empty()
+
+    generated = asyncio.create_task(asyncio.to_thread(
+        session.invoke_platform_tool,
+        "media.generate_image",
+        args,
+        "call_generate_edit",
+    ))
     request = await queue.get()
     forwarded = request["payload"]["arguments"]["requests"][0]
     assert forwarded["medias"] == args["requests"][0]["medias"]
@@ -2046,20 +2177,22 @@ async def test_runtime_media_rejects_moodboard_for_text_to_image_model_locally()
         "agent_media_text_with_reference",
         _runtime_call_db(
             "agent_media_text_with_reference",
+            ("call_preflight_text_with_reference", "media.generate_image"),
             ("call_generate_text_with_reference", "media.generate_image"),
         ),
     )
-    pending = asyncio.create_task(asyncio.to_thread(
+    args = {
+        "requests": [{
+            "model": model,
+            "prompt": "Apply this visual direction",
+            "medias": [{"role": "moodboard", "value": "output_moodboard"}],
+        }],
+    }
+    preflight_call = asyncio.create_task(asyncio.to_thread(
         session.invoke_platform_tool,
         "media.generate_image",
-        {
-            "requests": [{
-                "model": model,
-                "prompt": "Apply this visual direction",
-                "medias": [{"role": "moodboard", "value": "output_moodboard"}],
-            }],
-        },
-        "call_generate_text_with_reference",
+        args,
+        "call_preflight_text_with_reference",
     ))
     contract_request = await queue.get()
     assert contract_request["type"] == "runtime_control_request"
@@ -2076,6 +2209,16 @@ async def test_runtime_media_rejects_moodboard_for_text_to_image_model_locally()
         },
     })
 
+    preflight = json.loads(await preflight_call)
+    assert preflight["error"]["code"] == "model_schema_required"
+    assert queue.empty()
+
+    pending = asyncio.create_task(asyncio.to_thread(
+        session.invoke_platform_tool,
+        "media.generate_image",
+        args,
+        "call_generate_text_with_reference",
+    ))
     rejected = json.loads(await pending)
     assert rejected["error"]["code"] == "invalid_tool_arguments"
     assert "cannot accept the supplied platform media roles: moodboard" in rejected["error"]["message"]
@@ -2099,20 +2242,22 @@ async def test_runtime_media_rejects_provider_images_field_and_preserves_platfor
         "agent_media_provider_field",
         _runtime_call_db(
             "agent_media_provider_field",
+            ("call_preflight_provider_field", "media.generate_image"),
             ("call_generate_provider_field", "media.generate_image"),
         ),
     )
-    pending = asyncio.create_task(asyncio.to_thread(
+    args = {
+        "requests": [{
+            "model": model,
+            "prompt": "Apply this visual direction",
+            "images": [{"role": "moodboard", "value": "output_moodboard"}],
+        }],
+    }
+    preflight_call = asyncio.create_task(asyncio.to_thread(
         session.invoke_platform_tool,
         "media.generate_image",
-        {
-            "requests": [{
-                "model": model,
-                "prompt": "Apply this visual direction",
-                "images": [{"role": "moodboard", "value": "output_moodboard"}],
-            }],
-        },
-        "call_generate_provider_field",
+        args,
+        "call_preflight_provider_field",
     ))
     contract_request = await queue.get()
     assert contract_request["type"] == "runtime_control_request"
@@ -2129,6 +2274,16 @@ async def test_runtime_media_rejects_provider_images_field_and_preserves_platfor
         },
     })
 
+    preflight = json.loads(await preflight_call)
+    assert preflight["error"]["code"] == "model_schema_required"
+    assert queue.empty()
+
+    pending = asyncio.create_task(asyncio.to_thread(
+        session.invoke_platform_tool,
+        "media.generate_image",
+        args,
+        "call_generate_provider_field",
+    ))
     rejected = json.loads(await pending)
     assert rejected["error"]["code"] == "invalid_tool_arguments"
     assert "provider-managed media parameters: images" in rejected["error"]["message"]
