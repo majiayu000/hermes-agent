@@ -1733,7 +1733,6 @@ async def test_runtime_bridge_blocks_unchanged_non_retryable_tool_retry():
     assert first_result["error"]["code"] == "invalid_tool_arguments"
     assert first_result["error"]["recovery"] == {
         "action": "correct_arguments",
-        "remaining_attempts": 1,
         "same_arguments_allowed": False,
     }
     assert decisions == []
@@ -1868,7 +1867,7 @@ async def test_runtime_media_uses_private_contract_and_rejects_domain_ratio_fiel
 
 
 @pytest.mark.asyncio
-async def test_runtime_media_treats_platform_medias_as_required_provider_images():
+async def test_runtime_media_treats_platform_moodboard_as_required_provider_images():
     queue = asyncio.Queue()
     model = "bytedance/seedream-v5.0-pro/edit"
     session = RuntimeBridgeSession(
@@ -1887,7 +1886,7 @@ async def test_runtime_media_treats_platform_medias_as_required_provider_images(
         "requests": [{
             "model": model,
             "prompt": "Apply the locked style to @Image1",
-            "medias": [{"role": "reference", "value": "output_character"}],
+            "medias": [{"role": "moodboard", "value": "output_character"}],
         }],
     }
     generated = asyncio.create_task(asyncio.to_thread(
@@ -1923,7 +1922,110 @@ async def test_runtime_media_treats_platform_medias_as_required_provider_images(
 
 
 @pytest.mark.asyncio
-async def test_runtime_bridge_allows_one_corrected_argument_attempt_then_halts():
+async def test_runtime_media_rejects_moodboard_for_text_to_image_model_locally():
+    queue = asyncio.Queue()
+    model = "openai/gpt-image-2/text-to-image"
+    session = RuntimeBridgeSession(
+        "run_media_text_with_reference",
+        asyncio.get_running_loop(),
+        queue,
+        [{"name": "media.generate_image", "input_schema": {"type": "object"}}],
+        10_000,
+        "agent_media_text_with_reference",
+        _runtime_call_db(
+            "agent_media_text_with_reference",
+            ("call_generate_text_with_reference", "media.generate_image"),
+        ),
+    )
+    pending = asyncio.create_task(asyncio.to_thread(
+        session.invoke_platform_tool,
+        "media.generate_image",
+        {
+            "requests": [{
+                "model": model,
+                "prompt": "Apply this visual direction",
+                "medias": [{"role": "moodboard", "value": "output_moodboard"}],
+            }],
+        },
+        "call_generate_text_with_reference",
+    ))
+    contract_request = await queue.get()
+    assert contract_request["type"] == "runtime_control_request"
+    assert session.submit_control_result({
+        "request_id": contract_request["payload"]["request_id"],
+        "ok": True,
+        "result": {
+            "model": model,
+            "observed_schema_digest": "sha256:" + "c" * 64,
+            "parameters": [
+                {"name": "prompt", "type": "string", "required": True},
+                {"name": "size", "type": "string", "required": False},
+            ],
+        },
+    })
+
+    rejected = json.loads(await pending)
+    assert rejected["error"]["code"] == "invalid_tool_arguments"
+    assert "cannot accept the supplied platform media roles: moodboard" in rejected["error"]["message"]
+    assert rejected["error"]["recovery"] == {
+        "action": "correct_arguments",
+        "same_arguments_allowed": False,
+    }
+    assert queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_runtime_media_rejects_provider_images_field_and_preserves_platform_boundary():
+    queue = asyncio.Queue()
+    model = "openai/gpt-image-2/edit"
+    session = RuntimeBridgeSession(
+        "run_media_provider_field",
+        asyncio.get_running_loop(),
+        queue,
+        [{"name": "media.generate_image", "input_schema": {"type": "object"}}],
+        10_000,
+        "agent_media_provider_field",
+        _runtime_call_db(
+            "agent_media_provider_field",
+            ("call_generate_provider_field", "media.generate_image"),
+        ),
+    )
+    pending = asyncio.create_task(asyncio.to_thread(
+        session.invoke_platform_tool,
+        "media.generate_image",
+        {
+            "requests": [{
+                "model": model,
+                "prompt": "Apply this visual direction",
+                "images": [{"role": "moodboard", "value": "output_moodboard"}],
+            }],
+        },
+        "call_generate_provider_field",
+    ))
+    contract_request = await queue.get()
+    assert contract_request["type"] == "runtime_control_request"
+    assert session.submit_control_result({
+        "request_id": contract_request["payload"]["request_id"],
+        "ok": True,
+        "result": {
+            "model": model,
+            "observed_schema_digest": "sha256:" + "d" * 64,
+            "parameters": [
+                {"name": "prompt", "type": "string", "required": True},
+                {"name": "images", "type": "array", "required": True},
+            ],
+        },
+    })
+
+    rejected = json.loads(await pending)
+    assert rejected["error"]["code"] == "invalid_tool_arguments"
+    assert "provider-managed media parameters: images" in rejected["error"]["message"]
+    assert "requests[0].medias" in rejected["error"]["message"]
+    assert queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_runtime_bridge_allows_distinct_argument_corrections_until_success():
     queue = asyncio.Queue()
     session = RuntimeBridgeSession(
         "run_correction",
@@ -1936,6 +2038,7 @@ async def test_runtime_bridge_allows_one_corrected_argument_attempt_then_halts()
             "agent_correction",
             ("call_invalid", "ask_user_question"),
             ("call_still_invalid", "ask_user_question"),
+            ("call_valid", "ask_user_question"),
         ),
     )
     decisions = []
@@ -1967,7 +2070,7 @@ async def test_runtime_bridge_allows_one_corrected_argument_attempt_then_halts()
     )
     assert first["error"]["recovery"]["action"] == "correct_arguments"
 
-    exhausted = await invoke(
+    still_invalid = await invoke(
         "call_still_invalid",
         {"questions": [{"options": [{"label": "A", "description": "retry"}]}]},
         {
@@ -1979,10 +2082,19 @@ async def test_runtime_bridge_allows_one_corrected_argument_attempt_then_halts()
             },
         },
     )
-    assert exhausted["error"]["code"] == "argument_correction_exhausted"
-    assert exhausted["error"]["cause"]["code"] == "invalid_tool_arguments"
-    assert decisions[0].code == "argument_correction_exhausted"
-    assert decisions[0].count == 2
+    assert still_invalid["error"]["code"] == "invalid_tool_arguments"
+    assert still_invalid["error"]["recovery"] == {
+        "action": "correct_arguments",
+        "same_arguments_allowed": False,
+    }
+
+    completed = await invoke(
+        "call_valid",
+        {"questions": [{"options": [{"label": "A", "value": "a"}]}]},
+        {"ok": True, "result": {"answers": {"choice": "a"}}},
+    )
+    assert completed == {"answers": {"choice": "a"}}
+    assert decisions == []
 
 
 @pytest.mark.asyncio

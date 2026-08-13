@@ -72,7 +72,6 @@ _RUNTIME_NATIVE_TOOLS = frozenset({
     "web_search",
     "web_extract",
 })
-_MAX_ARGUMENT_CORRECTIONS = 1
 _MODEL_SCHEMA_ENVELOPE_FIELDS = frozenset({"request_id", "model", "medias"})
 _MEDIA_ROLE_PARAMETER_ALIASES = {
     "start_frame": ("first_frame", "first_frame_img", "image", "input_image"),
@@ -87,6 +86,7 @@ _MEDIA_ROLE_PARAMETER_ALIASES = {
     "audio": ("audio", "audio_url", "input_audio"),
     "reference": ("reference_images", "reference_image", "images", "image", "input_image"),
     "reference_image": ("reference_images", "reference_image", "images", "image", "input_image"),
+    "moodboard": ("reference_images", "reference_image", "images", "image", "input_image"),
     "style_reference": ("reference_images", "reference_image", "images", "image", "input_image"),
     "foundation_reference": ("reference_images", "reference_image", "images", "image", "input_image"),
     "character_reference": ("reference_images", "reference_image", "images", "image", "input_image"),
@@ -98,6 +98,13 @@ _MEDIA_ROLE_PARAMETER_ALIASES = {
     "user_upload": ("reference_images", "reference_image", "images", "image", "input_image"),
     "parcel_photo": ("reference_images", "reference_image", "images", "image", "input_image"),
 }
+_PLATFORM_MANAGED_MEDIA_PARAMETERS = frozenset(
+    _MEDIA_ROLE_PARAMETER_ALIASES
+) | frozenset(
+    parameter_name
+    for aliases in _MEDIA_ROLE_PARAMETER_ALIASES.values()
+    for parameter_name in aliases
+)
 _FAILED_ALLOWED_STRING_FIELDS = {"media_type", "model", "provider"}
 _FAILED_ALLOWED_STRING_LIST_FIELDS = {"aspect_ratios", "resolutions"}
 _FAILED_ALLOWED_INTEGER_LIST_FIELDS = {"durations"}
@@ -617,11 +624,30 @@ def _model_request_contract_error(
                 }
             }
         supplied = set(request) - _MODEL_SCHEMA_ENVELOPE_FIELDS
-        unknown = sorted(supplied - set(contract))
+        provider_media_fields = sorted(supplied & _PLATFORM_MANAGED_MEDIA_PARAMETERS)
+        if provider_media_fields:
+            return {
+                "error": {
+                    "code": "invalid_tool_arguments",
+                    "message": (
+                        f"requests[{index}] contains provider-managed media parameters: "
+                        f"{', '.join(provider_media_fields)}. Keep Runtime asset and output "
+                        f"references in requests[{index}].medias; the platform maps them to "
+                        "provider parameters at the execution boundary."
+                    ),
+                    "retryable": False,
+                }
+            }
+        literal_contract = {
+            name: parameter
+            for name, parameter in contract.items()
+            if name not in _PLATFORM_MANAGED_MEDIA_PARAMETERS
+        }
+        unknown = sorted(supplied - set(literal_contract))
         if unknown:
             allowed_parts = []
-            for parameter_name in sorted(contract):
-                options = contract[parameter_name]["options"]
+            for parameter_name in sorted(literal_contract):
+                options = literal_contract[parameter_name]["options"]
                 if options:
                     allowed_parts.append(f"{parameter_name}={options}")
                 else:
@@ -637,24 +663,72 @@ def _model_request_contract_error(
                     "retryable": False,
                 }
             }
-        missing = sorted(
-            name for name, parameter in contract.items()
-            if (
-                parameter["required"]
-                and name not in request
-                and not _model_parameter_is_supplied_by_medias(name, request)
-            )
+        medias = request.get("medias")
+        if isinstance(medias, list) and medias:
+            compatible_media_parameters = [
+                name
+                for name in contract
+                if (
+                    name in _PLATFORM_MANAGED_MEDIA_PARAMETERS
+                    and _model_parameter_is_supplied_by_medias(name, request)
+                )
+            ]
+            if not compatible_media_parameters:
+                roles = sorted({
+                    str(media.get("role") or "").strip()
+                    for media in medias
+                    if isinstance(media, dict) and str(media.get("role") or "").strip()
+                })
+                return {
+                    "error": {
+                        "code": "invalid_tool_arguments",
+                        "message": (
+                            f"Model {model!r} cannot accept the supplied platform media "
+                            f"roles: {', '.join(roles) or 'unknown'}. Preserve medias and "
+                            "use the workflow-declared model for that media stage."
+                        ),
+                        "retryable": False,
+                    }
+                }
+        missing_literal = sorted(
+            name for name, parameter in literal_contract.items()
+            if parameter["required"] and name not in request
         )
-        if missing:
+        if missing_literal:
             return {
                 "error": {
                     "code": "invalid_tool_arguments",
-                    "message": f"requests[{index}] is missing required model parameters: {', '.join(missing)}",
+                    "message": (
+                        f"requests[{index}] is missing required model parameters: "
+                        f"{', '.join(missing_literal)}"
+                    ),
+                    "retryable": False,
+                }
+            }
+        missing_media = sorted(
+            name
+            for name, parameter in contract.items()
+            if (
+                name in _PLATFORM_MANAGED_MEDIA_PARAMETERS
+                and parameter["required"]
+                and not _model_parameter_is_supplied_by_medias(name, request)
+            )
+        )
+        if missing_media:
+            return {
+                "error": {
+                    "code": "invalid_tool_arguments",
+                    "message": (
+                        f"requests[{index}] requires platform media input for model "
+                        f"{model!r}. Provide Runtime asset or output references in medias; "
+                        "do not send provider fields such as "
+                        f"{', '.join(missing_media)}."
+                    ),
                     "retryable": False,
                 }
             }
         for name in sorted(supplied):
-            parameter = contract[name]
+            parameter = literal_contract[name]
             value = request[name]
             if not _parameter_value_matches_type(value, parameter["type"]):
                 return {
@@ -1606,7 +1680,6 @@ class RuntimeBridgeSession:
         self.non_retryable_failures: dict[str, str] = {}
         self.native_non_retryable_failures: dict[str, str] = {}
         self.video_analyze_lock = threading.Lock()
-        self.argument_correction_failures: dict[str, int] = {}
         self.model_parameter_contracts: dict[str, dict[str, dict[str, Any]]] = {}
         self.model_contract_digests: dict[str, str] = {}
         self.pending_controls: dict[str, _PendingTool] = {}
@@ -1994,44 +2067,15 @@ class RuntimeBridgeSession:
             return json.dumps({"error": {"code": code, "message": message, "retryable": False}})
         result = pending.result or {}
         if result.get("ok"):
-            with self.lock:
-                self.argument_correction_failures.pop(name, None)
             return json.dumps(result.get("result"), ensure_ascii=False, separators=(",", ":"))
         failure = _failed_tool_result_projection(result)
         error = failure["error"]  # same dict; recovery added below stays in failure
         code = str(error.get("code") or "invalid_tool_result")
         if code == "invalid_tool_arguments":
-            with self.lock:
-                correction_count = self.argument_correction_failures.get(name, 0) + 1
-                self.argument_correction_failures[name] = correction_count
-            if correction_count <= _MAX_ARGUMENT_CORRECTIONS:
-                error["recovery"] = {
-                    "action": "correct_arguments",
-                    "remaining_attempts": _MAX_ARGUMENT_CORRECTIONS - correction_count + 1,
-                    "same_arguments_allowed": False,
-                }
-            else:
-                message = (
-                    f"{name} produced invalid arguments after "
-                    f"{_MAX_ARGUMENT_CORRECTIONS} correction attempt."
-                )
-                self._halt_tool_loop(
-                    name,
-                    args,
-                    "argument_correction_exhausted",
-                    message,
-                    correction_count,
-                )
-                failure["error"] = error = {
-                    "code": "argument_correction_exhausted",
-                    "message": message,
-                    "retryable": False,
-                    "cause": dict(error),
-                }
-                code = "argument_correction_exhausted"
-        else:
-            with self.lock:
-                self.argument_correction_failures.pop(name, None)
+            error["recovery"] = {
+                "action": "correct_arguments",
+                "same_arguments_allowed": False,
+            }
         if error.get("retryable") is False and code != "domain_gate_required":
             with self.lock:
                 self.non_retryable_failures[signature_key] = code
