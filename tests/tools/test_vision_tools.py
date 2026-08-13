@@ -862,6 +862,13 @@ class TestIsImageSizeError:
     def test_invalid_request(self):
         assert _is_image_size_error(Exception("invalid_request_error: image too big"))
 
+    def test_bounded_output_error_is_not_a_size_error(self):
+        error = Exception(
+            "invalid_request_error: bounded_output_required: "
+            "The model request could not be completed"
+        )
+        assert not _is_image_size_error(error)
+
     def test_exceeds_limit(self):
         assert _is_image_size_error(Exception("Image exceeds maximum size"))
 
