@@ -843,7 +843,7 @@ def test_private_runtime_activity_arguments_are_never_exposed():
     }) == {}
 
 
-def test_private_runtime_activity_event_omits_arguments():
+def test_private_runtime_activity_event_redacts_arguments_through_real_encoder():
     loop = asyncio.new_event_loop()
     queue = asyncio.Queue()
     session = RuntimeBridgeSession(
@@ -854,18 +854,22 @@ def test_private_runtime_activity_event_omits_arguments():
         1_000,
         "agent_activity",
     )
-    emitted = []
-    session.emit = lambda event_type, payload: emitted.append((event_type, payload))
     try:
         session.start_local_activity(
             "call_image_analyze",
             "image_analyze",
             {"image_url": "output_board_123", "question": "check the layout"},
         )
-        assert emitted == [(
-            "activity_started",
-            {"call_id": "call_image_analyze", "name": "image_analyze"},
-        )]
+        loop.run_until_complete(asyncio.sleep(0))
+        assert queue.get_nowait() == {
+            "run_id": "run_activity",
+            "type": "activity_started",
+            "payload": {
+                "call_id": "call_image_analyze",
+                "name": "image_analyze",
+                "arguments": {},
+            },
+        }
     finally:
         loop.close()
 

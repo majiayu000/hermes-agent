@@ -1859,10 +1859,10 @@ class RuntimeBridgeSession:
         payload: dict[str, Any] = {
             "call_id": call_id,
             "name": name,
+            # Media arguments are intentionally projected to an empty object;
+            # the canonical event contract still requires the field.
+            "arguments": _activity_arguments(name, args),
         }
-        arguments = _activity_arguments(name, args)
-        if name not in {"image_analyze", "video_analyze"}:
-            payload["arguments"] = arguments
         self.emit("activity_started", payload)
 
     def complete_local_activity(self, call_id: str, name: str, args: Any, result: Any) -> None:
