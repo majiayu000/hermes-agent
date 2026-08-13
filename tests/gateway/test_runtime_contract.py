@@ -1,8 +1,13 @@
 from gateway.runtime_contract import (
+    RUNTIME_CONTRACT_MAJOR,
+    RUNTIME_CONTRACT_MINOR,
+    RUNTIME_CONTRACT_SCHEMA_DIGEST,
     RUNTIME_DRIVER_FRAME_TYPES,
     RUNTIME_PROTOCOL_VERSION,
+    RUNTIME_RUN_REQUEST_SCHEMA_DIGEST,
     runtime_error_envelope,
     runtime_health_contract,
+    runtime_manifest_contract,
 )
 
 
@@ -17,6 +22,41 @@ def test_runtime_health_contract_is_explicit_and_versioned():
         "system_context.replace",
         "llm_egress",
     } <= set(contract["runtime_capabilities"])
+
+
+def test_runtime_manifest_contract_is_negotiable_and_contains_real_limits():
+    manifest = runtime_manifest_contract(
+        runtime_build="git:" + "a" * 40,
+        max_request_bytes=98_000_000,
+        max_tool_result_bytes=10_000_000,
+    )
+
+    assert manifest == {
+        "runtime": "hermes",
+        "runtime_build": "git:" + "a" * 40,
+        "contract": {
+            "major": RUNTIME_CONTRACT_MAJOR,
+            "min_minor": RUNTIME_CONTRACT_MINOR,
+            "max_minor": RUNTIME_CONTRACT_MINOR,
+            "schema_digests": [RUNTIME_CONTRACT_SCHEMA_DIGEST],
+        },
+        "intents": ["bootstrap", "new_turn", "resume", "retry", "rebootstrap"],
+        "features": [
+            "llm_egress.v1",
+            "session_db_rebootstrap.v1",
+            "tool_result_replay.v1",
+            "vision_llm_egress.v1",
+        ],
+        "limits": {
+            "max_request_bytes": 98_000_000,
+            "max_tool_result_bytes": 10_000_000,
+        },
+    }
+    assert RUNTIME_RUN_REQUEST_SCHEMA_DIGEST.startswith("sha256:")
+    assert len(RUNTIME_RUN_REQUEST_SCHEMA_DIGEST) == len("sha256:") + 64
+    assert RUNTIME_CONTRACT_SCHEMA_DIGEST.startswith("sha256:")
+    assert len(RUNTIME_CONTRACT_SCHEMA_DIGEST) == len("sha256:") + 64
+    assert RUNTIME_CONTRACT_SCHEMA_DIGEST != RUNTIME_RUN_REQUEST_SCHEMA_DIGEST
 
 
 def test_runtime_error_envelope_never_includes_raw_exception_text():

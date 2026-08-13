@@ -40,7 +40,17 @@ from gateway.api_server_shared import (
     web,
 )
 from gateway.config import is_runtime_driver_only
-from gateway.runtime_contract import runtime_error_envelope
+from gateway.runtime_contract import (
+    RUNTIME_RUN_INTENTS,
+    RUNTIME_RUN_REQUEST_FIELDS,
+    runtime_error_envelope,
+)
+from gateway.runtime_contract_models import (
+    decode_runtime_event,
+    decode_runtime_run_request,
+    decode_runtime_tool_result,
+    encode_runtime_event,
+)
 from agent.tool_dispatch_helpers import DeferredToolResult
 from gateway.runtime_session_history import (
     RuntimeSessionStateError as _RuntimeSessionStateError,
@@ -263,7 +273,9 @@ async def _next_runtime_stream_event(
             timeout=_RUNTIME_STREAM_HEARTBEAT_SECONDS,
         )
     except asyncio.TimeoutError:
-        return {"type": "heartbeat", "payload": {}}
+        heartbeat: dict[str, Any] = {"type": "heartbeat", "payload": {}}
+        decode_runtime_event(heartbeat)
+        return heartbeat
 
 
 def _runtime_max_concurrent() -> int:
@@ -1890,6 +1902,12 @@ class RuntimeBridgeSession:
     def emit(self, event_type: str, payload: dict[str, Any]) -> None:
         event = {"run_id": self.run_id, "type": event_type, "payload": payload}
         try:
+            decode_runtime_event(event)
+        except ValueError:
+            raise RuntimeError(
+                f"Runtime event {event_type!r} violates the canonical contract"
+            ) from None
+        try:
             if asyncio.get_running_loop() is self.loop:
                 self.queue.put_nowait(event)
                 return
@@ -1914,10 +1932,10 @@ class RuntimeBridgeSession:
         payload: dict[str, Any] = {
             "call_id": call_id,
             "name": name,
+            # Media arguments are intentionally projected to an empty object;
+            # the canonical event contract still requires the field.
+            "arguments": _activity_arguments(name, args),
         }
-        arguments = _activity_arguments(name, args)
-        if name not in {"image_analyze", "video_analyze"}:
-            payload["arguments"] = arguments
         self.emit("activity_started", payload)
 
     def complete_local_activity(self, call_id: str, name: str, args: Any, result: Any) -> None:
@@ -2014,7 +2032,10 @@ class RuntimeBridgeSession:
             self._assert_active_tool_call_persisted(call_id, name)
         except _RuntimeSessionStateError as exc:
             message = str(exc)
-            self.emit("error", {"code": exc.code, "message": message})
+            self.emit(
+                "error",
+                {"code": exc.code, "message": message, "retryable": False},
+            )
             self.interrupt(message)
             return json.dumps({
                 "error": {
@@ -2046,7 +2067,12 @@ class RuntimeBridgeSession:
             if call_id in self.pending:
                 return json.dumps({"error": {"code": "idempotency_conflict", "message": "duplicate active tool call id"}})
             self.pending[call_id] = pending
-        payload: dict[str, Any] = {"call_id": call_id, "name": name, "arguments": args}
+        payload: dict[str, Any] = {
+            "call_id": call_id,
+            "name": name,
+            "arguments": args,
+            "skills": [],
+        }
         self.emit("tool_request", payload)
         wait_timeout = (
             self.deadline_seconds
@@ -2193,28 +2219,7 @@ class APIServerRuntimeMixin:
             body = await request.json()
             if not isinstance(body, dict):
                 raise ValueError("request body must be an object")
-            supported_fields = {
-                "intent",
-                "run_id",
-                "model",
-                "messages",
-                "system_context",
-                "tools",
-                "tool_results",
-                "context",
-                "runtime_context",
-                "artifact_manifest",
-                "attachment_references",
-                "attachments",
-                "skill_manifest",
-                "run_state",
-                "deadline_ms",
-                "llm_egress",
-                "vision_llm_egress",
-                "retry_context",
-                "recovery_tool_calls",
-            }
-            if set(body) - supported_fields:
+            if set(body) - RUNTIME_RUN_REQUEST_FIELDS:
                 raise ValueError("request contains unsupported fields")
             require_llm_egress = (
                 os.environ.get("HERMES_RUNTIME_REQUIRE_LLM_EGRESS", "")
@@ -2230,8 +2235,7 @@ class APIServerRuntimeMixin:
                 body.get("vision_llm_egress")
             )
             intent = body.get("intent")
-            allowed_intents = {"bootstrap", "new_turn", "resume", "retry", "rebootstrap"}
-            if not isinstance(intent, str) or intent not in allowed_intents:
+            if not isinstance(intent, str) or intent not in RUNTIME_RUN_INTENTS:
                 raise ValueError(
                     "intent must be bootstrap, new_turn, resume, retry, or rebootstrap"
                 )
@@ -2332,6 +2336,12 @@ class APIServerRuntimeMixin:
                     body.get("attachment_references"),
                 )
             )
+            try:
+                decode_runtime_run_request(body)
+            except ValueError as exc:
+                raise ValueError(
+                    "request violates the canonical Runtime contract"
+                ) from exc
             schemas = _tool_schemas(definitions)
             tool_exposure = build_runtime_tool_exposure(definitions, schemas)
             attachments = body.get("attachments")
@@ -2487,7 +2497,16 @@ class APIServerRuntimeMixin:
         _ensure_session_sweeper()
         with _SESSIONS_LOCK:
             if run_id in _SESSIONS or agent_session_id in _SESSIONS:
-                await response.write(json.dumps({"run_id": run_id, "type": "error", "payload": {"code": "run_state_conflict", "message": "run already active"}}).encode() + b"\n")
+                conflict_event = {
+                    "run_id": run_id,
+                    "type": "error",
+                    "payload": runtime_error_envelope(
+                        "run_state_conflict",
+                        support_id=run_id,
+                    ),
+                }
+                decode_runtime_event(conflict_event)
+                await response.write(encode_runtime_event(conflict_event) + b"\n")
                 if media_temp_dir is not None:
                     media_temp_dir.cleanup()
                 return response
@@ -2565,7 +2584,7 @@ class APIServerRuntimeMixin:
                 if event is None:
                     return
                 try:
-                    await response.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n")
+                    await response.write(encode_runtime_event(event) + b"\n")
                 except Exception as exc:
                     # The orchestrator went away; without an interrupt the
                     # agent keeps running and events pile into the queue.
@@ -2672,6 +2691,18 @@ class APIServerRuntimeMixin:
             result = await request.json()
         except Exception:
             return web.json_response({"error": {"code": "invalid_param", "message": "invalid JSON"}}, status=400)
+        try:
+            decode_runtime_tool_result(result)
+        except ValueError:
+            return web.json_response(
+                {
+                    "error": {
+                        "code": "invalid_tool_result",
+                        "message": "result violates the Runtime contract",
+                    }
+                },
+                status=422,
+            )
         if not isinstance(result, dict) or not session.submit_result(result):
             return web.json_response({"error": {"code": "invalid_tool_result", "message": "unknown call_id"}}, status=409)
         return web.Response(status=204)
