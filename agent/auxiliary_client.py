@@ -5817,6 +5817,15 @@ def call_llm(
         tools=tools, timeout=effective_timeout, extra_body=effective_extra_body,
         base_url=_base_info or resolved_base_url)
 
+    # Managed Runtime capabilities are issued by a platform boundary that
+    # requires every request to declare a bounded output.  The generic
+    # auxiliary path intentionally omits output caps for most OpenAI-compatible
+    # providers, so restore the caller-supplied bound only for this trusted,
+    # request-scoped route.  Keep model-specific wire compatibility (for
+    # example GPT-5 uses max_completion_tokens while Qwen uses max_tokens).
+    if run_scoped_capability is not None and max_tokens is not None:
+        kwargs.update(auxiliary_max_tokens_param(max_tokens, model=final_model))
+
     # Convert image blocks for Anthropic-compatible endpoints (e.g. MiniMax)
     _client_base = str(getattr(client, "base_url", "") or "")
     if _is_anthropic_compat_endpoint(resolved_provider, _client_base):
@@ -6366,6 +6375,11 @@ async def async_call_llm(
         temperature=temperature, max_tokens=max_tokens,
         tools=tools, timeout=effective_timeout, extra_body=effective_extra_body,
         base_url=_client_base or resolved_base_url)
+
+    # See the synchronous path above.  Managed Runtime grants are bounded
+    # capabilities, and the execution boundary rejects an unbounded request.
+    if run_scoped_capability is not None and max_tokens is not None:
+        kwargs.update(auxiliary_max_tokens_param(max_tokens, model=final_model))
 
     # Convert image blocks for Anthropic-compatible endpoints (e.g. MiniMax)
     if _is_anthropic_compat_endpoint(resolved_provider, _client_base):

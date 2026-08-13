@@ -164,6 +164,91 @@ class TestBuildCallKwargsMaxTokens:
         assert "max_completion_tokens" not in kwargs
 
 
+class TestRunScopedAuxiliaryOutputBounds:
+    """Managed Runtime capabilities must preserve the requested output cap."""
+
+    @staticmethod
+    def _capability():
+        return {
+            "vision": {
+                "model": "qwen/qwen3-vl-235b-a22b-thinking",
+                "base_url": "https://vision.example.test/v1",
+                "grant": "test-run-scoped-grant",
+            }
+        }
+
+    def test_sync_vision_sends_bound_to_run_scoped_capability(self):
+        from agent.run_scoped_auxiliary import (
+            bind_run_scoped_auxiliary,
+            reset_run_scoped_auxiliary,
+        )
+
+        client = MagicMock()
+        client.base_url = "https://vision.example.test/v1"
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
+        )
+        client.chat.completions.create.return_value = response
+        token = bind_run_scoped_auxiliary(self._capability())
+        try:
+            with patch(
+                "agent.auxiliary_client.resolve_vision_provider_client",
+                return_value=(
+                    "custom",
+                    client,
+                    "qwen/qwen3-vl-235b-a22b-thinking",
+                ),
+            ):
+                result = call_llm(
+                    task="vision",
+                    messages=[{"role": "user", "content": "inspect"}],
+                    max_tokens=2400,
+                )
+        finally:
+            reset_run_scoped_auxiliary(token)
+
+        assert result is response
+        kwargs = client.chat.completions.create.call_args.kwargs
+        assert kwargs["max_tokens"] == 2400
+        assert "max_completion_tokens" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_async_vision_sends_bound_to_run_scoped_capability(self):
+        from agent.run_scoped_auxiliary import (
+            bind_run_scoped_auxiliary,
+            reset_run_scoped_auxiliary,
+        )
+
+        client = MagicMock()
+        client.base_url = "https://vision.example.test/v1"
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
+        )
+        client.chat.completions.create = AsyncMock(return_value=response)
+        token = bind_run_scoped_auxiliary(self._capability())
+        try:
+            with patch(
+                "agent.auxiliary_client.resolve_vision_provider_client",
+                return_value=(
+                    "custom",
+                    client,
+                    "qwen/qwen3-vl-235b-a22b-thinking",
+                ),
+            ):
+                result = await async_call_llm(
+                    task="vision",
+                    messages=[{"role": "user", "content": "inspect"}],
+                    max_tokens=2400,
+                )
+        finally:
+            reset_run_scoped_auxiliary(token)
+
+        assert result is response
+        kwargs = client.chat.completions.create.call_args.kwargs
+        assert kwargs["max_tokens"] == 2400
+        assert "max_completion_tokens" not in kwargs
+
+
 class TestNousTagsScoping:
     def test_tags_injected_when_provider_is_nous(self, monkeypatch):
         import agent.auxiliary_client as aux

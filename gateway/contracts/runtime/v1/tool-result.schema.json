@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ultrastudio.ai/contracts/runtime/v1/tool-result.schema.json",
+  "title": "Ultra Studio Runtime Tool Result Request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["call_id", "ok"],
+  "properties": {
+    "call_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "result": {},
+    "error": {
+      "$ref": "error.schema.json"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "ok": {
+            "const": false
+          }
+        },
+        "required": ["ok"]
+      },
+      "then": {
+        "required": ["error"]
+      }
+    }
+  ],
+  "x-ultra-contract": {
+    "name": "ultra.runtime.tool-result",
+    "major": 1,
+    "minor": 0
+  }
+}
