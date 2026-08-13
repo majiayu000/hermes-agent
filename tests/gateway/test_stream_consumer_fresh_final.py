@@ -90,7 +90,7 @@ class TestFreshFinalForLongLivedPreviews:
         )
         await consumer._send_or_edit("hello")
         # Force the preview to look stale (visible for > 60s).
-        consumer._message_created_ts = time.monotonic() - 61.0
+        consumer._message_created_ts = time.monotonic() - 120.0
         await consumer._send_or_edit("hello world", finalize=True)
         # Fresh send happened; no edit of the old preview.
         assert adapter.send.call_count == 2
@@ -115,7 +115,7 @@ class TestFreshFinalForLongLivedPreviews:
             config=StreamConsumerConfig(fresh_final_after_seconds=60.0),
         )
         await consumer._send_or_edit("hello")
-        consumer._message_created_ts = time.monotonic() - 61.0
+        consumer._message_created_ts = time.monotonic() - 120.0
         await consumer._send_or_edit("hello world", finalize=True)
         assert adapter.send.call_count == 2
         adapter.edit_message.assert_not_called()
@@ -136,7 +136,7 @@ class TestFreshFinalForLongLivedPreviews:
             config=StreamConsumerConfig(fresh_final_after_seconds=60.0),
         )
         await consumer._send_or_edit("hello")
-        consumer._message_created_ts = time.monotonic() - 61.0
+        consumer._message_created_ts = time.monotonic() - 120.0
         ok = await consumer._send_or_edit("hello world", finalize=True)
         # Fresh send was attempted and failed → edit happened instead.
         assert adapter.send.call_count == 2

@@ -22,9 +22,14 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from gateway.platforms.api_server import APIServerAdapter
+from gateway.runtime_capability_auth import (
+    RuntimeCapabilityConfig,
+    RuntimeCapabilityVerifier,
+)
 
 RUNTIME_ROUTES = {
     ("GET", "/healthz"),
+    ("GET", "/v1/runtime/manifest"),
     ("POST", "/v1/runtime/runs"),
     ("POST", "/v1/runtime/runs/{run_id}/tool-results"),
     ("POST", "/v1/runtime/runs/{run_id}/control-results"),
@@ -138,6 +143,41 @@ class TestSetupRoutes:
             ):
                 resp = await client.request(method, path)
                 assert resp.status == 404, f"{method} {path} must 404"
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_runtime_manifest_requires_service_identity_without_operation_capability(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("HERMES_RUNTIME_DRIVER_ONLY", "1")
+        adapter = _make_adapter()
+        adapter._runtime_capability_verifier = RuntimeCapabilityVerifier(
+            RuntimeCapabilityConfig(
+                service_token="runtime-service-test",
+                public_keys={},
+            )
+        )
+        adapter._app = web.Application()
+        adapter._setup_routes()
+        client = TestClient(TestServer(adapter._app))
+        await client.start_server()
+        try:
+            rejected = await client.get("/v1/runtime/manifest")
+            assert rejected.status == 401
+
+            accepted = await client.get(
+                "/v1/runtime/manifest",
+                headers={
+                    "X-Ultra-Service-Authorization": "Bearer runtime-service-test",
+                },
+            )
+            assert accepted.status == 200
+            body = await accepted.json()
+            assert body["runtime"] == "hermes"
+            assert body["contract"]["schema_digests"][0].startswith("sha256:")
+            assert "vision_llm_egress.v1" in body["features"]
         finally:
             await client.close()
 

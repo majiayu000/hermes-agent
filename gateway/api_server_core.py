@@ -16,7 +16,7 @@ from gateway.runtime_provenance import (
     RuntimeProvenanceConfig,
     collect_runtime_provenance,
 )
-from gateway.runtime_contract import runtime_health_contract
+from gateway.runtime_contract import runtime_health_contract, runtime_manifest_contract
 from gateway.runtime_capability_auth import (
     RuntimeCapabilityConfig,
     RuntimeCapabilityError,
@@ -363,6 +363,25 @@ class APIServerCoreMixin:
                 headers=request_id_headers(request),
             )
 
+    def _check_runtime_service_auth(self, request: "web.Request") -> Optional["web.Response"]:
+        """Authenticate a read-only Runtime negotiation request."""
+        if not is_runtime_driver_only():
+            return self._check_auth(request)
+        try:
+            if self._runtime_capability_verifier is None:
+                self._runtime_capability_verifier = RuntimeCapabilityVerifier(
+                    RuntimeCapabilityConfig.from_env()
+                )
+            self._runtime_capability_verifier.verify_service_identity(request)
+            return None
+        except RuntimeCapabilityError as exc:
+            logger.warning("Runtime service identity rejected: %s", exc)
+            return web.json_response(
+                {"error": {"message": "Invalid runtime service credential", "type": "invalid_request_error", "code": "invalid_runtime_service_credential"}},
+                status=401,
+                headers=request_id_headers(request),
+            )
+
     # ------------------------------------------------------------------
     # Session header helpers
     # ------------------------------------------------------------------
@@ -575,6 +594,32 @@ class APIServerCoreMixin:
                 **runtime_health_contract(),
                 **self._runtime_provenance.to_dict(),
             }
+        )
+
+    async def _handle_runtime_manifest(self, request: "web.Request") -> "web.Response":
+        """GET /v1/runtime/manifest — authenticated compatibility metadata."""
+        auth_error = self._check_runtime_service_auth(request)
+        if auth_error:
+            return auth_error
+        if self._runtime_provenance is None:
+            self._runtime_provenance = collect_runtime_provenance(
+                RuntimeProvenanceConfig(
+                    listen_host=self._host,
+                    listen_port=self._port,
+                    cors_origins=self._cors_origins,
+                    model_name=self._model_name,
+                    max_concurrent_runs=self._max_concurrent_runs,
+                ),
+                startup_timestamp=self._runtime_started_at,
+            )
+        git_commit = self._runtime_provenance.git_commit
+        runtime_build = "git:" + git_commit if git_commit != "unknown" else "unknown"
+        return web.json_response(
+            runtime_manifest_contract(
+                runtime_build=runtime_build,
+                max_request_bytes=MAX_RUNTIME_REQUEST_BYTES,
+                max_tool_result_bytes=MAX_REQUEST_BYTES,
+            )
         )
 
     async def _handle_health_detailed(self, request: "web.Request") -> "web.Response":

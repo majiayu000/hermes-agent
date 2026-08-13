@@ -39,6 +39,7 @@ from gateway.api_server_runtime import (
     _runtime_image_paths,
     _runtime_allowed_skill_names,
     _runtime_skill_projections,
+    _runtime_history_tool_names,
     _runtime_video_paths,
     _runtime_tool_middleware,
     _runtime_verified_activity_prompt,
@@ -902,7 +903,7 @@ def test_private_runtime_activity_arguments_are_never_exposed():
     }) == {}
 
 
-def test_private_runtime_activity_event_omits_arguments():
+def test_private_runtime_activity_event_redacts_arguments_through_real_encoder():
     loop = asyncio.new_event_loop()
     queue = asyncio.Queue()
     session = RuntimeBridgeSession(
@@ -913,18 +914,22 @@ def test_private_runtime_activity_event_omits_arguments():
         1_000,
         "agent_activity",
     )
-    emitted = []
-    session.emit = lambda event_type, payload: emitted.append((event_type, payload))
     try:
         session.start_local_activity(
             "call_image_analyze",
             "image_analyze",
             {"image_url": "output_board_123", "question": "check the layout"},
         )
-        assert emitted == [(
-            "activity_started",
-            {"call_id": "call_image_analyze", "name": "image_analyze"},
-        )]
+        loop.run_until_complete(asyncio.sleep(0))
+        assert queue.get_nowait() == {
+            "run_id": "run_activity",
+            "type": "activity_started",
+            "payload": {
+                "call_id": "call_image_analyze",
+                "name": "image_analyze",
+                "arguments": {},
+            },
+        }
     finally:
         loop.close()
 
@@ -998,6 +1003,7 @@ async def test_runtime_bridge_delivers_image_attachment_as_multimodal_user_conte
             "model": "chat-test",
             "context": {"session_id": "session-run-attachment"},
             "messages": [{"id": "message-attachment", "role": "user", "content": "describe it"}],
+            "tools": [],
             "system_context": {
                 "version": version,
                 "mode": "replace",
@@ -1088,6 +1094,7 @@ async def test_runtime_bridge_exposes_scoped_video_analysis_and_cleans_source_fi
             "model": "chat-test",
             "context": {"session_id": "session-run-video-attachment"},
             "messages": [{"id": "message-video-attachment", "role": "user", "content": "analyze the complete video"}],
+            "tools": [],
             "system_context": {
                 "version": version,
                 "mode": "replace",
@@ -1158,6 +1165,7 @@ planning instructions
             "model": "chat-test",
             "context": {"session_id": "panel_session_test"},
             "messages": [{"id": "message-run-test", "role": "user", "content": "make an image"}],
+            "tools": [],
             "system_context": {
                 "version": version,
                 "mode": mode,
@@ -1287,6 +1295,7 @@ planning instructions
             "call_id": "call_01",
             "name": "ultra_media_job_create",
             "arguments": {"operation": "image.generate", "prompt": "test"},
+            "skills": [],
         }
 
         delivered = await client.post("/v1/runtime/runs/run_test/tool-results", json={
@@ -1591,6 +1600,48 @@ def test_runtime_same_turn_retry_requires_user_or_tool_tail():
         )
 
 
+def test_runtime_retry_removes_only_local_interruption_marker():
+    history = [
+        {"role": "user", "content": "make a video"},
+        {"role": "tool", "content": "temporary local result"},
+        {
+            "role": "assistant",
+            "content": "Operation interrupted: waiting for model response (0.6s elapsed).",
+        },
+    ]
+    assert _retry_session_db_history(history) == history[:-1]
+    with pytest.raises(RuntimeSessionStateError, match="must end with user or tool"):
+        _retry_session_db_history([
+            *history[:-1],
+            {"role": "assistant", "content": "A real assistant response"},
+        ])
+
+
+def test_runtime_history_restores_deferred_tools_loaded_by_tool_search():
+    history = [
+        {
+            "role": "assistant",
+            "tool_calls": [{
+                "id": "search_1",
+                "function": {"name": "tool_search", "arguments": "{}"},
+            }],
+        },
+        {
+            "role": "tool",
+            "tool_name": "tool_search",
+            "tool_call_id": "search_1",
+            "content": json.dumps({
+                "loaded_tools": ["media.generate_video", "media.estimate_cost"],
+            }),
+        },
+    ]
+    assert _runtime_history_tool_names(history) == {
+        "tool_search",
+        "media.generate_video",
+        "media.estimate_cost",
+    }
+
+
 @pytest.mark.asyncio
 async def test_runtime_resume_wiring_reaches_agent_without_new_user_message():
     class ResumeAdapter(_TestRuntimeAdapter):
@@ -1729,6 +1780,7 @@ async def test_runtime_driver_reports_skill_failure_without_result_content():
             "model": "chat-test",
             "context": {"session_id": "panel_session_failed_skill"},
             "messages": [{"id": "message-failed-skill", "role": "user", "content": "load a missing skill"}],
+            "tools": [],
             "system_context": {
                 "version": version,
                 "mode": mode,
@@ -2284,6 +2336,7 @@ async def test_runtime_driver_rejects_non_replacement_or_tampered_prompt():
             "model": "chat-test",
             "context": {"session_id": "panel_session_bad"},
             "messages": [{"id": "message-bad-prompt", "role": "user", "content": "hello"}],
+            "tools": [],
             "system_context": {
                 "version": "ultrastudio-supercomputer/v1",
                 "mode": "append",
@@ -2317,6 +2370,7 @@ def _run_body(run_id: str, **extra):
         "model": "chat-test",
         "context": {"session_id": f"session-{run_id}"},
         "messages": [{"id": f"message-{run_id}", "role": "user", "content": "go"}],
+        "tools": [],
         "system_context": {
             "version": version,
             "mode": "replace",
@@ -3460,6 +3514,7 @@ async def test_runtime_run_pins_one_hour_prompt_cache_ttl():
             "model": "chat-test",
             "context": {"session_id": "session-run-ttl"},
             "messages": [{"id": "message-ttl", "role": "user", "content": "make an image"}],
+            "tools": [],
             "system_context": {
                 "version": version,
                 "mode": "replace",
