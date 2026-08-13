@@ -660,6 +660,17 @@ def coerce_tool_args(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     if not args or not isinstance(args, dict):
         return args
 
+    # Multimodal models commonly emit the singular ``image_path`` spelling
+    # for a single attachment even though image_analyze's public contract uses
+    # ``image_paths``.  Normalize it before runtime ownership middleware sees
+    # the call so the resolved path is still checked against the Run's allowed
+    # attachment set.  If a canonical field is already present, the singular
+    # alias is ignored rather than widening the requested image set.
+    if tool_name == "image_analyze" and "image_path" in args:
+        if "image_url" not in args and "image_paths" not in args:
+            args["image_paths"] = args["image_path"]
+        args.pop("image_path", None)
+
     schema = registry.get_schema(tool_name)
     if not schema:
         return args

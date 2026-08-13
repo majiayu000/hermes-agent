@@ -751,6 +751,66 @@ def test_runtime_image_tool_accepts_coerced_json_encoded_allowed_path_array(tmp_
         session.loop.close()
 
 
+def test_runtime_image_tool_scopes_normalized_singular_path_alias(tmp_path):
+    allowed = tmp_path / "allowed.png"
+    unowned = tmp_path / "unowned.png"
+    allowed.write_bytes(b"image")
+    unowned.write_bytes(b"image")
+    queue = asyncio.Queue()
+    session = RuntimeBridgeSession(
+        "run_image_singular_alias",
+        asyncio.new_event_loop(),
+        queue,
+        [],
+        1_000,
+        "agent_image_singular_alias",
+        allowed_image_paths={str(allowed)},
+    )
+    runtime_module._SESSIONS["agent_image_singular_alias"] = session
+    try:
+        seen = []
+        allowed_args = coerce_tool_args("image_analyze", {
+            "image_path": str(allowed),
+            "question": "Describe it",
+        })
+        accepted = _runtime_tool_middleware(
+            tool_name="image_analyze",
+            args=allowed_args,
+            session_id="agent_image_singular_alias",
+            tool_call_id="image_singular_alias_ok",
+            next_call=lambda args: seen.append(args) or '{"success":true}',
+        )
+        assert accepted == '{"success":true}'
+        assert seen == [{
+            "image_paths": str(allowed),
+            "question": "Describe it",
+        }]
+
+        denied_args = coerce_tool_args("image_analyze", {
+            "image_path": str(unowned),
+            "question": "Describe it",
+        })
+        denied = _runtime_tool_middleware(
+            tool_name="image_analyze",
+            args=denied_args,
+            session_id="agent_image_singular_alias",
+            tool_call_id="image_singular_alias_denied",
+            next_call=lambda _args: pytest.fail(
+                "an unowned singular path alias reached the image tool"
+            ),
+        )
+        assert json.loads(denied) == {
+            "success": False,
+            "error": (
+                "image_analyze may only read HTTP(S) images or local image "
+                "attachments owned by this run."
+            ),
+        }
+    finally:
+        runtime_module._SESSIONS.pop("agent_image_singular_alias", None)
+        session.loop.close()
+
+
 def test_runtime_image_tool_rejects_json_encoded_array_with_unowned_path(tmp_path):
     allowed = tmp_path / "allowed.png"
     unowned = tmp_path / "unowned.png"
