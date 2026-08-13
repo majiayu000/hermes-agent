@@ -387,6 +387,27 @@ class TestCoerceToolArgs:
         })
         assert result["image_paths"] == ["/tmp/one.png", "/tmp/two.png"]
 
+    def test_policy_boundary_normalizes_singular_image_path_alias(self):
+        result = _coerce_tool_args_for_policy("image_analyze", {
+            "image_path": "/tmp/attachment.png",
+            "question": "Describe it",
+        })
+        assert result == {
+            "image_paths": "/tmp/attachment.png",
+            "question": "Describe it",
+        }
+
+    def test_canonical_image_field_wins_over_singular_alias(self):
+        result = _coerce_tool_args_for_policy("image_analyze", {
+            "image_url": "https://example.com/reference.png",
+            "image_path": "/tmp/unrequested.png",
+            "question": "Describe it",
+        })
+        assert result == {
+            "image_url": "https://example.com/reference.png",
+            "question": "Describe it",
+        }
+
     def test_extra_args_without_schema_left_alone(self):
         """Args not in the schema properties are not touched."""
         schema = self._mock_schema({"limit": {"type": "integer"}})
