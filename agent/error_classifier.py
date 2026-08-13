@@ -31,6 +31,7 @@ class FailoverReason(enum.Enum):
     # Billing / quota
     billing = "billing"                  # 402 or confirmed credit exhaustion — rotate immediately
     rate_limit = "rate_limit"            # 429 or quota-based throttling — backoff then rotate
+    run_budget_exhausted = "run_budget_exhausted"  # Platform run safety limit — fail closed
 
     # Server-side
     overloaded = "overloaded"            # 503/529 — provider overloaded, backoff
@@ -565,6 +566,18 @@ def classify_api_error(
         }
         defaults.update(overrides)
         return ClassifiedError(**defaults)
+
+    # The run-bound Orchestrator egress returns this stable code with HTTP 429,
+    # but it is a durable platform safety limit, not a transient provider rate
+    # limit. Retrying, rotating credentials, or falling back cannot replenish
+    # it and would only repeat the same rejected request.
+    if error_code == "run_budget_exhausted":
+        return _result(
+            FailoverReason.run_budget_exhausted,
+            retryable=False,
+            should_rotate_credential=False,
+            should_fallback=False,
+        )
 
     # ── 1. Provider-specific patterns (highest priority) ────────────
 

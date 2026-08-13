@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from gateway.api_server_runtime import (
+    _RUNTIME_LLM_MAX_OUTPUT_TOKENS,
     _configure_run_llm_egress,
     _runtime_auxiliary_llm_egress,
     _runtime_failure_code,
@@ -70,6 +71,7 @@ def test_configure_run_llm_egress_rebuilds_run_scoped_client():
         api_mode="chat_completions",
     )
     _configure_run_llm_egress(agent, value, "moonshotai/kimi-k3")
+    assert agent.max_tokens == _RUNTIME_LLM_MAX_OUTPUT_TOKENS
     agent.api_key = "shared-key"
     with pytest.raises(ValueError, match="inconsistent"):
         _configure_run_llm_egress(agent, value, "moonshotai/kimi-k3")
@@ -98,7 +100,7 @@ def test_run_scoped_agent_creation_never_resolves_shared_credentials():
         "command": None,
         "args": [],
         "credential_pool": None,
-        "max_tokens": None,
+        "max_tokens": _RUNTIME_LLM_MAX_OUTPUT_TOKENS,
     }
     with (
         patch("gateway.run._resolve_runtime_agent_kwargs") as shared_resolver,
@@ -115,6 +117,35 @@ def test_run_scoped_agent_creation_never_resolves_shared_credentials():
     shared_model.assert_not_called()
     assert agent_class.call_args.kwargs["api_key"] == runtime["api_key"]
     assert agent_class.call_args.kwargs["model"] == "zai-org/glm-5.2"
+    assert agent_class.call_args.kwargs["max_tokens"] == _RUNTIME_LLM_MAX_OUTPUT_TOKENS
+
+
+def test_runtime_budget_exhaustion_is_safe_and_not_retryable():
+    from agent.error_classifier import FailoverReason, classify_api_error
+
+    error = RuntimeError(
+        "Error code: 429 - {'error': {'code': 'run_budget_exhausted', "
+        "'message': 'The model request could not be completed.'}}"
+    )
+    error.status_code = 429
+    error.body = {
+        "error": {
+            "code": "run_budget_exhausted",
+            "message": "The model request could not be completed.",
+        }
+    }
+    classified = classify_api_error(error, provider="custom", model="zai-org/glm-5.2")
+    assert classified.reason == FailoverReason.run_budget_exhausted
+    assert classified.retryable is False
+    assert classified.should_rotate_credential is False
+    assert classified.should_fallback is False
+    assert _runtime_failure_code({
+        "failed": True,
+        "failure_reason": "run_budget_exhausted",
+    }) == "runtime_budget_exhausted"
+    envelope = runtime_error_envelope("runtime_budget_exhausted", support_id="run_budget")
+    assert envelope["retryable"] is False
+    assert "safety limit" in envelope["message"]
 
 
 @pytest.mark.asyncio

@@ -122,8 +122,13 @@ _RUNTIME_STREAM_HEARTBEAT_SECONDS = 15.0
 _UNBOUNDED_TOOL_WAIT_CAP_SECONDS = 3600.0
 _SESSION_SWEEP_INTERVAL_SECONDS = 60.0
 _FINISHED_SESSION_TTL_SECONDS = 120.0
+# Runtime runs can make many tool-driven model calls. Keep each call bounded
+# independently so the Orchestrator can reserve a realistic output envelope
+# instead of the model's much larger theoretical maximum.
+_RUNTIME_LLM_MAX_OUTPUT_TOKENS = 8192
 
 _FAILURE_REASON_CODES = {
+    "run_budget_exhausted": "runtime_budget_exhausted",
     "billing": "insufficient_credits",
     "content_policy_blocked": "content_policy_blocked",
     "format_error": "model_incompatible",
@@ -226,6 +231,10 @@ def _configure_run_llm_egress(agent: Any, capability: dict[str, str] | None, mod
         != capability["base_url"]
     ):
         raise ValueError("agent run-scoped LLM egress configuration is inconsistent")
+    agent.max_tokens = _RUNTIME_LLM_MAX_OUTPUT_TOKENS
+    session_model_config = getattr(agent, "_session_init_model_config", None)
+    if isinstance(session_model_config, dict):
+        session_model_config["max_tokens"] = _RUNTIME_LLM_MAX_OUTPUT_TOKENS
 
 _RUNTIME_GATE_LOCK = threading.Lock()
 _RUNTIME_EXECUTOR: ThreadPoolExecutor | None = None
@@ -2513,7 +2522,7 @@ class APIServerRuntimeMixin:
                             "command": None,
                             "args": [],
                             "credential_pool": None,
-                            "max_tokens": None,
+                            "max_tokens": _RUNTIME_LLM_MAX_OUTPUT_TOKENS,
                         },
                         "model_override": str(body.get("model") or "").strip(),
                     }
