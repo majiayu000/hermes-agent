@@ -542,7 +542,46 @@ def _model_parameter_contract(
             "options": list(parameter.get("options") or []),
             "description": str(parameter.get("description") or ""),
         }
+        if "default" in parameter:
+            contract[name]["default"] = parameter.get("default")
     return model, digest, contract
+
+
+def _model_contract_preflight(
+    models: list[str],
+    contracts: dict[str, dict[str, dict[str, Any]]],
+) -> dict[str, Any]:
+    """Return exact new-model fields to the Agent before a paid submission."""
+    projected_contracts = []
+    for model in sorted(models):
+        parameters = []
+        for name, parameter in sorted(contracts[model].items()):
+            if name in _PLATFORM_MANAGED_MEDIA_PARAMETERS:
+                continue
+            projected = {
+                "name": name,
+                "type": parameter["type"],
+                "required": parameter["required"],
+                "options": parameter["options"],
+                "description": parameter["description"],
+            }
+            if "default" in parameter:
+                projected["default"] = parameter["default"]
+            parameters.append(projected)
+        projected_contracts.append({"model": model, "parameters": parameters})
+    return {
+        "error": {
+            "code": "model_schema_required",
+            "message": (
+                "Exact model parameters are now available. Reconcile every explicit "
+                "workflow value with the provider defaults before retrying; prompt prose "
+                "does not override omitted literal parameters."
+            ),
+            "retryable": True,
+        },
+        "recovery": {"action": "reconcile_model_parameters"},
+        "model_contracts": projected_contracts,
+    }
 
 
 def _parameter_value_matches_type(value: Any, parameter_type: str) -> bool:
@@ -1828,6 +1867,7 @@ class RuntimeBridgeSession:
             for request in requests
             if isinstance(request, dict) and str(request.get("model") or "").strip()
         })
+        resolved_models: list[str] = []
         for model in models:
             with self.lock:
                 if model in self.model_parameter_contracts:
@@ -1885,6 +1925,12 @@ class RuntimeBridgeSession:
             with self.lock:
                 self.model_contract_digests[model] = model_contract[1]
                 self.model_parameter_contracts[model] = model_contract[2]
+            resolved_models.append(model)
+        if resolved_models:
+            return _model_contract_preflight(
+                resolved_models,
+                self.model_parameter_contracts,
+            )
         return None
 
     def emit(self, event_type: str, payload: dict[str, Any]) -> None:
