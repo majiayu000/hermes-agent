@@ -3803,6 +3803,7 @@ async def test_runtime_run_pins_one_hour_prompt_cache_ttl():
         ({"failed": True, "failure_reason": "timeout"}, "provider_timeout"),
         ({"failed": True, "failure_reason": "format_error"}, "model_incompatible"),
         ({"failed": True, "failure_reason": "multimodal_tool_content_unsupported"}, "model_incompatible"),
+        ({"failed": True, "failure_reason": "run_budget_exhausted"}, "run_budget_exhausted"),
         ({"failed": True, "turn_exit_reason": "empty_response_exhausted"}, "provider_empty_stream"),
         ({"failed": True, "error": "content_policy_blocked: rejected"}, "content_policy_blocked"),
         ({"failed": True, "error": "private downstream detail"}, "runtime_unavailable"),

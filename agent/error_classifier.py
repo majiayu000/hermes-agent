@@ -31,6 +31,7 @@ class FailoverReason(enum.Enum):
     # Billing / quota
     billing = "billing"                  # 402 or confirmed credit exhaustion — rotate immediately
     rate_limit = "rate_limit"            # 429 or quota-based throttling — backoff then rotate
+    run_budget_exhausted = "run_budget_exhausted"  # Durable run ledger is exhausted — fail closed
 
     # Server-side
     overloaded = "overloaded"            # 503/529 — provider overloaded, backoff
@@ -567,6 +568,19 @@ def classify_api_error(
         return ClassifiedError(**defaults)
 
     # ── 1. Provider-specific patterns (highest priority) ────────────
+
+    # The Ultra Studio LLM egress proxy uses HTTP 429 for its durable,
+    # per-run safety ledger. This is not an upstream provider throttle: the
+    # same run cannot replenish its ledger, rotate credentials, or succeed on
+    # an unchanged retry. Preserve the structured code before generic 429
+    # classification turns it into a transient rate limit.
+    if error_code.lower() == "run_budget_exhausted":
+        return _result(
+            FailoverReason.run_budget_exhausted,
+            retryable=False,
+            should_rotate_credential=False,
+            should_fallback=False,
+        )
 
     # Provider content-policy / safety-filter block. The provider has made a
     # deterministic refusal decision about THIS prompt — retrying unchanged

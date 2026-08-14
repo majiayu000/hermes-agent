@@ -169,8 +169,11 @@ _FAILURE_REASON_CODES = {
     "timeout": "provider_timeout",
     "overloaded": "provider_unavailable",
     "rate_limit": "provider_unavailable",
+    "run_budget_exhausted": "run_budget_exhausted",
     "server_error": "provider_unavailable",
 }
+
+_RUNTIME_LLM_MAX_TOKENS = 16_384
 
 
 def _runtime_failure_code(result: Any) -> str:
@@ -220,6 +223,30 @@ def _runtime_llm_egress(value: Any, *, required: bool) -> dict[str, str] | None:
     if expiry.tzinfo is None or expiry.astimezone(timezone.utc) <= datetime.now(timezone.utc):
         raise ValueError("llm_egress grant is expired")
     return {"base_url": base_url, "grant": grant, "expires_at": expires_at}
+
+
+def _runtime_agent_creation_overrides(
+    llm_egress: dict[str, str] | None,
+    model: Any,
+) -> dict[str, Any] | None:
+    if llm_egress is None:
+        return None
+    return {
+        "runtime_overrides": {
+            "api_key": llm_egress["grant"],
+            "base_url": llm_egress["base_url"],
+            "provider": "custom",
+            "api_mode": "chat_completions",
+            "command": None,
+            "args": [],
+            "credential_pool": None,
+            # The generic custom-provider default is intentionally generous,
+            # but a run-scoped capability must reserve its requested output
+            # against a finite durable ledger before every turn.
+            "max_tokens": _RUNTIME_LLM_MAX_TOKENS,
+        },
+        "model_override": str(model or "").strip(),
+    }
 
 
 def _runtime_vision_llm_egress(value: Any) -> dict[str, str] | None:
@@ -2661,22 +2688,9 @@ class APIServerRuntimeMixin:
                 tool_complete_callback=on_tool_complete,
                 agent_ref=session.agent_ref,
                 agent_configurator=configure_agent,
-                agent_creation_overrides=(
-                    {
-                        "runtime_overrides": {
-                            "api_key": llm_egress["grant"],
-                            "base_url": llm_egress["base_url"],
-                            "provider": "custom",
-                            "api_mode": "chat_completions",
-                            "command": None,
-                            "args": [],
-                            "credential_pool": None,
-                            "max_tokens": None,
-                        },
-                        "model_override": str(body.get("model") or "").strip(),
-                    }
-                    if llm_egress is not None
-                    else None
+                agent_creation_overrides=_runtime_agent_creation_overrides(
+                    llm_egress,
+                    body.get("model"),
                 ),
                 runtime_auxiliary_egress=(
                     {"vision": vision_llm_egress}

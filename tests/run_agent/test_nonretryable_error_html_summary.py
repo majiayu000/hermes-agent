@@ -128,3 +128,28 @@ def test_non_retryable_failure_error_is_summarized_not_raw_html():
     # The original page was tens of kilobytes; a summary is short.
     assert len(error) < 500
     assert len(error) < len(_CLOUDFLARE_CHALLENGE_HTML)
+
+
+def test_run_budget_exhaustion_stops_after_one_call_and_preserves_reason():
+    error = Exception("The model request could not be completed.")
+    error.status_code = 429
+    error.body = {
+        "error": {
+            "code": "run_budget_exhausted",
+            "message": "The model request could not be completed.",
+            "type": "invalid_request_error",
+        }
+    }
+    agent = _make_agent()
+    agent.client.chat.completions.create.side_effect = error
+
+    with (
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        result = agent.run_conversation("continue the media workflow")
+
+    assert agent.client.chat.completions.create.call_count == 1
+    assert result.get("failed") is True
+    assert result.get("failure_reason") == "run_budget_exhausted"

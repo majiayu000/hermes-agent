@@ -6,6 +6,7 @@ import pytest
 
 from gateway.api_server_runtime import (
     _configure_run_llm_egress,
+    _runtime_agent_creation_overrides,
     _runtime_failure_code,
     _runtime_llm_egress,
     _runtime_vision_llm_egress,
@@ -37,6 +38,15 @@ def test_runtime_llm_egress_validates_private_capability():
             capability(expires_at=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()),
             required=True,
         )
+
+
+def test_runtime_llm_egress_uses_a_bounded_output_reservation():
+    value = capability()
+    overrides = _runtime_agent_creation_overrides(value, "zai-org/glm-5.2")
+    assert overrides is not None
+    assert overrides["runtime_overrides"]["max_tokens"] == 16_384
+    assert overrides["runtime_overrides"]["api_key"] == value["grant"]
+    assert overrides["model_override"] == "zai-org/glm-5.2"
 
 
 def test_runtime_vision_llm_egress_requires_a_fixed_model():
@@ -72,6 +82,13 @@ def test_runtime_contract_and_billing_failure_are_account_aware():
     envelope = runtime_error_envelope("insufficient_credits", support_id="run_1")
     assert envelope["code"] == "insufficient_credits"
     assert envelope["retryable"] is False
+    budget_envelope = runtime_error_envelope(
+        "run_budget_exhausted",
+        support_id="run_2",
+    )
+    assert budget_envelope["retryable"] is False
+    assert budget_envelope["code"] == "run_budget_exhausted"
+    assert "agent model-call budget" in budget_envelope["message"]
 
 
 @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)

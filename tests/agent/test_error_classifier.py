@@ -53,6 +53,7 @@ class TestFailoverReason:
     def test_enum_members_exist(self):
         expected = {
             "auth", "auth_permanent", "billing", "rate_limit",
+            "run_budget_exhausted",
             "overloaded", "server_error", "timeout",
             "context_overflow", "payload_too_large", "image_too_large",
             "model_not_found", "format_error",
@@ -409,6 +410,24 @@ class TestClassifyApiError:
         result = classify_api_error(e, provider="zai")
         assert result.reason == FailoverReason.rate_limit
         assert result.should_rotate_credential is True
+
+    def test_run_budget_exhausted_is_not_a_retryable_provider_limit(self):
+        e = MockAPIError(
+            "The model request could not be completed.",
+            status_code=429,
+            body={
+                "error": {
+                    "code": "run_budget_exhausted",
+                    "message": "The model request could not be completed.",
+                    "type": "invalid_request_error",
+                }
+            },
+        )
+        result = classify_api_error(e, provider="custom")
+        assert result.reason == FailoverReason.run_budget_exhausted
+        assert result.retryable is False
+        assert result.should_rotate_credential is False
+        assert result.should_fallback is False
 
     # ── 5xx that are actually request-validation errors ──
     # Some OpenAI-compatible gateways (e.g. codex.nekos.me) return
