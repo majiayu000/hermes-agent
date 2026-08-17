@@ -169,9 +169,9 @@ _FAILURE_REASON_CODES = {
     "timeout": "provider_timeout",
     "overloaded": "provider_unavailable",
     "rate_limit": "provider_unavailable",
+    "run_budget_exhausted": "run_budget_exhausted",
     "server_error": "provider_unavailable",
 }
-
 
 def _runtime_failure_code(result: Any) -> str:
     if not isinstance(result, dict):

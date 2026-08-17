@@ -72,6 +72,13 @@ def test_runtime_contract_and_billing_failure_are_account_aware():
     envelope = runtime_error_envelope("insufficient_credits", support_id="run_1")
     assert envelope["code"] == "insufficient_credits"
     assert envelope["retryable"] is False
+    budget_envelope = runtime_error_envelope(
+        "run_budget_exhausted",
+        support_id="run_2",
+    )
+    assert budget_envelope["retryable"] is False
+    assert budget_envelope["code"] == "run_budget_exhausted"
+    assert "agent model-call budget" in budget_envelope["message"]
 
 
 @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)

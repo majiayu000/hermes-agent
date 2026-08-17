@@ -88,6 +88,9 @@ _SAFE_ERROR_MESSAGES = {
     "provider_empty_stream": "The creation service returned no output.",
     "provider_timeout": "The creation service timed out.",
     "provider_unavailable": "The creation service is temporarily unavailable.",
+    "run_budget_exhausted": (
+        "This run has exhausted its agent model-call budget. Existing outputs were preserved."
+    ),
     "runtime_unavailable": "The creation service is temporarily unavailable.",
 }
 _RETRYABLE_ERROR_CODES = frozenset({
