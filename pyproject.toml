@@ -333,7 +333,7 @@ locales = ["locales/*.yaml"]
 
 [tool.setuptools.package-data]
 hermes_cli = ["web_dist/**/*", "tui_dist/**/*", "scripts/install.sh", "scripts/install.ps1"]
-gateway = ["assets/**/*", "contracts/**/*"]
+gateway = ["assets/**/*", "contracts/**/*", "runtime_prompts/**/*.md"]
 plugins = [
   "*/dashboard/manifest.json",
   "*/dashboard/dist/*",

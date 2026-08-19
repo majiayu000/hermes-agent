@@ -68,6 +68,44 @@ def test_run_request_decoder_rejects_missing_required_and_unknown_fields():
         decode_runtime_run_request(unknown)
 
 
+def test_run_request_decoder_accepts_bounded_structured_invoked_skills():
+    valid = {**_valid_run_request(), "invoked_skills": ["briefing", "production"]}
+    assert decode_runtime_run_request(valid).invoked_skills == [
+        "briefing",
+        "production",
+    ]
+
+    with pytest.raises(ValidationError):
+        decode_runtime_run_request(
+            {**_valid_run_request(), "invoked_skills": ["Bad_Name"]}
+        )
+    with pytest.raises(ValidationError):
+        decode_runtime_run_request(
+            {**_valid_run_request(), "invoked_skills": ["skill"] * 9}
+        )
+
+
+def test_run_request_decoder_accepts_profile_and_keeps_legacy_replace():
+    profile = _valid_run_request()
+    profile["system_context"] = {
+        "version": "ultra-agent-v1",
+        "mode": "profile",
+    }
+    assert decode_runtime_run_request(profile).system_context.mode == "profile"
+
+    with pytest.raises(ValidationError):
+        decode_runtime_run_request(
+            {
+                **profile,
+                "system_context": {
+                    "version": "ultra-agent-v1",
+                    "mode": "profile",
+                    "stable": "forbidden",
+                },
+            }
+        )
+
+
 def test_event_decoder_rejects_unnegotiated_type_and_bad_payload():
     completed = {
         "run_id": "run_fixture",

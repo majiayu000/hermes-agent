@@ -32,6 +32,7 @@ RUNTIME_CAPABILITIES = (
     "session_db_resume",
     "session_db_rebootstrap/v1",
     "retry_current_turn/v1",
+    "system_context.profile",
     "system_context.replace",
     "llm_egress",
     "vision_llm_egress",

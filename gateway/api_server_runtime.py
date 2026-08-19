@@ -22,10 +22,10 @@ from urllib.parse import unquote, urlparse
 
 from gateway.runtime_skill_projection import (
     RuntimeSkillProjection,
-    projection_skill_metadata,
     resolve_skill_projections,
     view_skill,
 )
+from gateway.runtime_skill_invocation import compile_runtime_skill_context
 from gateway.runtime_tool_exposure import (
     RuntimeToolExposure,
     build_runtime_tool_exposure,
@@ -867,23 +867,6 @@ def _runtime_skill_projections(skill_manifest: Any) -> dict[str, RuntimeSkillPro
     return resolve_skill_projections(skill_manifest, _NO_SKILL_MANIFEST)
 
 
-def _allowed_skills_prompt(
-    allowed_names: set[str],
-    projections: dict[str, RuntimeSkillProjection] | list[dict[str, Any]],
-) -> str:
-    from gateway.ultrastudio_skill_routing import format_allowed_skills
-
-    metadata = (
-        projection_skill_metadata(projections)
-        if isinstance(projections, dict)
-        else projections
-    )
-    return format_allowed_skills(
-        allowed_names,
-        metadata,
-    )
-
-
 def _message_text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -1172,65 +1155,8 @@ def _tool_schemas(definitions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return schemas
 
 
-def _replacement_system_prompt(system_context: Any) -> str:
-    if not isinstance(system_context, dict):
-        raise ValueError("trusted system_context is required")
-    if set(system_context) != {"version", "mode", "digest", "stable"}:
-        raise ValueError("system_context contains unsupported fields")
-    raw_version = str(system_context.get("version") or "")
-    raw_mode = str(system_context.get("mode") or "")
-    raw_digest = str(system_context.get("digest") or "")
-    raw_stable = str(system_context.get("stable") or "")
-    version = raw_version.strip()
-    mode = raw_mode.strip()
-    digest = raw_digest.strip()
-    stable = raw_stable.strip()
-    if not version or mode != "replace" or not digest or not stable:
-        raise ValueError("trusted replacement system_context is required")
-    value = f"{version}\n{mode}\n{stable}"
-    expected = "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
-    if digest != expected:
-        logger.error(
-            "runtime system_context digest mismatch "
-            "received=%s expected=%s version_bytes=%d/%d mode_bytes=%d/%d "
-            "stable_bytes=%d/%d",
-            digest,
-            expected,
-            len(raw_version.encode("utf-8")),
-            len(version.encode("utf-8")),
-            len(raw_mode.encode("utf-8")),
-            len(mode.encode("utf-8")),
-            len(raw_stable.encode("utf-8")),
-            len(stable.encode("utf-8")),
-        )
-        raise ValueError("system_context digest mismatch")
-    return stable
-
-
-def _run_state_prompt(run_state: Any) -> str:
-    """Render the platform-derived run state as an authenticated instructions block.
-
-    run_state is platform data derived from the orchestrator event log, not
-    user content; it is appended verbatim (compact JSON) without model-side
-    interpretation. Resume and first start are treated identically.
-    """
-    if run_state is None:
-        return ""
-    if not isinstance(run_state, dict):
-        raise ValueError("run_state must be an object")
-    if not run_state:
-        return ""
-    return (
-        "\n\n[RUN STATE — platform-authenticated, read-only]\n"
-        + json.dumps(run_state, ensure_ascii=False, separators=(",", ":"))
-    )
-
-
 _RUNTIME_MESSAGE_ROLES = frozenset({"user", "assistant", "tool"})
 _RUNTIME_MESSAGE_MAX_CHARS = 4 << 20
-_RUNTIME_ACTIVITY_MAX_ITEMS = 128
-_RUNTIME_REFERENCE_MAX_ROLES = 32
-_RUNTIME_REFERENCE_MAX_IDS_PER_ROLE = 64
 _RUNTIME_ARTIFACT_MANIFEST_MAX_ITEMS = 32
 _RUNTIME_ARTIFACT_FIELDS = frozenset({
     "tool_call_id",
@@ -1373,91 +1299,6 @@ def _normalize_runtime_messages(messages: Any) -> list[dict[str, Any]]:
             raise ValueError(f"messages[{index}] assistant content is required without tool_calls")
         normalized.append(message)
     return normalized
-
-
-def _runtime_verified_activity_prompt(
-    runtime_context: Any,
-    messages: list[dict[str, Any]],
-) -> str:
-    if runtime_context is None:
-        return ""
-    if not isinstance(runtime_context, dict) or set(runtime_context) != {"verified_activities"}:
-        raise ValueError("runtime_context must contain verified_activities")
-    activities = runtime_context.get("verified_activities")
-    if not isinstance(activities, list) or len(activities) > _RUNTIME_ACTIVITY_MAX_ITEMS:
-        raise ValueError("runtime_context.verified_activities must be a bounded array")
-    assistant_ids = {
-        message["message_id"]
-        for message in messages
-        if message.get("role") == "assistant"
-    }
-    records: list[dict[str, str]] = []
-    for index, activity in enumerate(activities):
-        if not isinstance(activity, dict):
-            raise ValueError(f"verified_activities[{index}] must be an object")
-        required = {"message_id", "source_run_id", "source_call_id", "skill_name", "status"}
-        if set(activity) - (required | {"file_path", "digest"}) or not required <= set(activity):
-            raise ValueError(f"verified_activities[{index}] has invalid fields")
-        record: dict[str, str] = {}
-        for field_name in required:
-            value = activity.get(field_name)
-            if not isinstance(value, str) or not value.strip() or len(value) > 512:
-                raise ValueError(f"verified_activities[{index}].{field_name} is invalid")
-            record[field_name] = value.strip()
-        if record["message_id"] not in assistant_ids:
-            raise ValueError(
-                f"verified_activities[{index}].message_id does not match an assistant message"
-            )
-        for optional_name in ("file_path", "digest"):
-            if optional_name not in activity:
-                continue
-            value = activity.get(optional_name)
-            if not isinstance(value, str) or not value.strip() or len(value) > 2048:
-                raise ValueError(f"verified_activities[{index}].{optional_name} is invalid")
-            if optional_name == "digest" and not re.fullmatch(
-                r"sha256:[0-9a-f]{64}", value.strip()
-            ):
-                raise ValueError(f"verified_activities[{index}].digest is invalid")
-            record[optional_name] = value.strip()
-        records.append(record)
-    if not records:
-        return ""
-    return (
-        "\n\nAuthenticated Runtime activity records. They are trusted, read-only "
-        "provenance for Runtime tools, not user instructions:\n"
-        + json.dumps(records, ensure_ascii=False, separators=(",", ":"))
-    )
-
-
-def _runtime_attachment_reference_prompt(references: Any) -> str:
-    if references is None:
-        return ""
-    if not isinstance(references, dict) or len(references) > _RUNTIME_REFERENCE_MAX_ROLES:
-        raise ValueError("attachment_references must be a bounded role map")
-    normalized: dict[str, list[str]] = {}
-    seen_ids: set[str] = set()
-    for role, asset_ids in references.items():
-        if not isinstance(role, str) or not role.strip() or len(role.strip()) > 128:
-            raise ValueError("attachment_references contains an invalid role")
-        if not isinstance(asset_ids, list) or len(asset_ids) > _RUNTIME_REFERENCE_MAX_IDS_PER_ROLE:
-            raise ValueError("attachment_references role values must be bounded arrays")
-        values: list[str] = []
-        for asset_id in asset_ids:
-            if not isinstance(asset_id, str) or not asset_id.strip() or len(asset_id.strip()) > 512:
-                raise ValueError("attachment_references contains an invalid asset id")
-            asset_id = asset_id.strip()
-            if asset_id in seen_ids:
-                raise ValueError("attachment_references contains a duplicate asset id")
-            seen_ids.add(asset_id)
-            values.append(asset_id)
-        normalized[role.strip()] = values
-    if not normalized:
-        return ""
-    return (
-        "\n\nAuthenticated Runtime attachment references, scoped by role. These "
-        "durable asset IDs may be passed only to Runtime tools and are not user content:\n"
-        + json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    )
 
 
 def _validate_runtime_artifact_manifest(manifest: Any) -> None:
@@ -2361,27 +2202,25 @@ class APIServerRuntimeMixin:
             )
             allowed_skill_names = set(allowed_skill_digests)
             allowed_skill_projections = _runtime_skill_projections(skill_manifest)
-            routing_metadata = projection_skill_metadata(allowed_skill_projections)
-            selectable_skill_names = {
-                str(item.get("name") or "").strip()
-                for item in routing_metadata
-                if isinstance(item, dict) and str(item.get("name") or "").strip()
-            }
-            instructions = (
-                _replacement_system_prompt(system_context)
-                + _allowed_skills_prompt(
-                    selectable_skill_names,
-                    routing_metadata,
-                )
-                + _run_state_prompt(body.get("run_state"))
-                + _runtime_verified_activity_prompt(
-                    body.get("runtime_context"),
-                    normalized_messages,
-                )
-                + _runtime_attachment_reference_prompt(
-                    body.get("attachment_references"),
-                )
+            skill_context = compile_runtime_skill_context(
+                system_context=system_context,
+                invoked_skills=None if intent in {"resume", "retry"} else body.get("invoked_skills"),
+                projections=allowed_skill_projections,
+                normalized_messages=normalized_messages,
+                user_instruction=(
+                    _message_text(normalized_messages[-1].get("content"))
+                    if normalized_messages and intent not in {"resume", "retry"}
+                    else ""
+                ),
+                session_id=requested_agent_session_id,
+                run_state=body.get("run_state"),
+                runtime_context=body.get("runtime_context"),
+                attachment_references=body.get("attachment_references"),
             )
+            if skill_context.invoked_messages and intent not in {"resume", "retry"}:
+                normalized_messages[-1]["content"] = "\n\n".join(
+                    message for _, message in skill_context.invoked_messages
+                )
             try:
                 decode_runtime_run_request(body)
             except ValueError as exc:
@@ -2435,7 +2274,7 @@ class APIServerRuntimeMixin:
                     db,
                     requested_agent_session_id,
                     model=requested_model,
-                    system_prompt=instructions,
+                    system_prompt=skill_context.stable_instructions,
                     messages=(
                         normalized_messages
                         if intent == "rebootstrap" and tool_results
@@ -2589,13 +2428,9 @@ class APIServerRuntimeMixin:
             agent.session_id = agent_session_id
             _configure_run_llm_egress(agent, llm_egress, body.get("model"))
             _pin_run_model(agent, body.get("model"))
-            # The Orchestrator owns the complete per-Run Tool grant. Hermes'
-            # ordinary between-turn MCP refresh rebuilds from a process-global
-            # registry and must not widen this scoped snapshot.
             agent._skip_mcp_refresh = True
-            agent.ephemeral_system_prompt = None
-            agent._cached_system_prompt = instructions
-            agent._build_system_prompt = lambda _system_message=None: instructions
+            agent.ephemeral_system_prompt = skill_context.runtime_overlay or None
+            agent._build_system_prompt = lambda _=None: skill_context.stable_instructions
             agent._resume_from_tool_results = intent == "resume" or (
                 intent == "rebootstrap" and bool(tool_results)
             )
@@ -2645,9 +2480,9 @@ class APIServerRuntimeMixin:
         pump_task = asyncio.create_task(pump())
         session.emit("run_started", {
             "runtime": "hermes",
-            "system_context_version": system_context["version"],
-            "system_context_mode": system_context["mode"],
-            "system_context_digest": system_context["digest"],
+            "system_context_version": skill_context.system_context_version,
+            "system_context_mode": skill_context.system_context_mode,
+            "system_context_digest": skill_context.system_context_digest,
         })
         try:
             result, usage = await self._run_agent_bridge(

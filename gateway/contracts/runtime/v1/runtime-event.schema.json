@@ -44,7 +44,7 @@
             "properties": {
               "runtime": {"const": "hermes"},
               "system_context_version": {"type": "string", "minLength": 1},
-              "system_context_mode": {"const": "replace"},
+              "system_context_mode": {"enum": ["profile", "replace"]},
               "system_context_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
             }
           }
@@ -203,6 +203,6 @@
   "x-ultra-contract": {
     "name": "ultra.runtime.runtime-event",
     "major": 1,
-    "minor": 0
+    "minor": 2
   }
 }

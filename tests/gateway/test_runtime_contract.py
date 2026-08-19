@@ -41,10 +41,12 @@ def test_runtime_manifest_contract_is_negotiable_and_contains_real_limits():
             "schema_digests": [RUNTIME_CONTRACT_SCHEMA_DIGEST],
         },
         "intents": ["bootstrap", "new_turn", "resume", "retry", "rebootstrap"],
-        "features": [
-            "llm_egress.v1",
-            "session_db_rebootstrap.v1",
-            "tool_result_replay.v1",
+            "features": [
+                "invoked_skills.v1",
+                "llm_egress.v1",
+                "session_db_rebootstrap.v1",
+                "system_prompt_profiles.v1",
+                "tool_result_replay.v1",
             "vision_llm_egress.v1",
         ],
         "limits": {

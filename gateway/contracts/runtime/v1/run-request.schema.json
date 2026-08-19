@@ -72,9 +72,7 @@
       "additionalProperties": false,
       "required": [
         "version",
-        "mode",
-        "stable",
-        "digest"
+        "mode"
       ],
       "properties": {
         "version": {
@@ -82,7 +80,10 @@
           "minLength": 1
         },
         "mode": {
-          "const": "replace"
+          "enum": [
+            "profile",
+            "replace"
+          ]
         },
         "stable": {
           "type": "string"
@@ -91,7 +92,25 @@
           "type": "string",
           "pattern": "^sha256:[0-9a-f]{64}$"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {"const": "replace"}
+            }
+          },
+          "then": {"required": ["stable", "digest"]},
+          "else": {
+            "not": {
+              "anyOf": [
+                {"required": ["stable"]},
+                {"required": ["digest"]}
+              ]
+            }
+          }
+        }
+      ]
     },
     "tool_results": {
       "type": "array",
@@ -140,6 +159,17 @@
     },
     "skill_manifest": {
       "type": "object"
+    },
+    "invoked_skills": {
+      "type": "array",
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+      }
     },
     "run_state": {
       "type": "object"
@@ -256,10 +286,12 @@
   "x-ultra-contract": {
     "name": "ultra.runtime.run-request",
     "major": 1,
-    "minor": 0,
+    "minor": 2,
     "features": [
+      "invoked_skills.v1",
       "llm_egress.v1",
       "session_db_rebootstrap.v1",
+      "system_prompt_profiles.v1",
       "tool_result_replay.v1",
       "vision_llm_egress.v1"
     ]

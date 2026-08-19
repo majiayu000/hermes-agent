@@ -23,6 +23,14 @@ NonEmpty128 = Annotated[str, StringConstraints(min_length=1, max_length=128)]
 NonEmpty255 = Annotated[str, StringConstraints(min_length=1, max_length=255)]
 NonEmpty256 = Annotated[str, StringConstraints(min_length=1, max_length=256)]
 NonEmpty512 = Annotated[str, StringConstraints(min_length=1, max_length=512)]
+SkillAlias = Annotated[
+    str,
+    StringConstraints(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$",
+    ),
+]
 ErrorCode = Annotated[
     str,
     StringConstraints(min_length=1, max_length=128, pattern=r"^[a-z0-9][a-z0-9._]*$"),
@@ -59,9 +67,17 @@ class RuntimeMessage(_StrictModel):
 
 class RuntimeSystemContext(_StrictModel):
     version: Annotated[str, StringConstraints(min_length=1)]
-    mode: Literal["replace"]
-    stable: str
-    digest: SHA256Digest
+    mode: Literal["profile", "replace"]
+    stable: str | None = None
+    digest: SHA256Digest | None = None
+
+    @model_validator(mode="after")
+    def require_mode_fields(self) -> "RuntimeSystemContext":
+        if self.mode == "replace" and (self.stable is None or self.digest is None):
+            raise ValueError("replacement system context requires stable and digest")
+        if self.mode == "profile" and (self.stable is not None or self.digest is not None):
+            raise ValueError("profile system context accepts only version and mode")
+        return self
 
 
 class RuntimeContext(_StrictModel):
@@ -117,6 +133,7 @@ class RuntimeRunRequest(_StrictModel):
     ) = None
     attachments: list[JsonObject] | None = None
     skill_manifest: JsonObject | None = None
+    invoked_skills: Annotated[list[SkillAlias], Field(max_length=8)] | None = None
     run_state: JsonObject | None = None
     deadline_ms: Annotated[int, Field(ge=0)] | None = None
     llm_egress: RuntimeLLMEgress | None = None
@@ -198,7 +215,7 @@ class RuntimeManifest(_StrictModel):
 class RunStartedPayload(_StrictModel):
     runtime: Literal["hermes"]
     system_context_version: Annotated[str, StringConstraints(min_length=1)]
-    system_context_mode: Literal["replace"]
+    system_context_mode: Literal["profile", "replace"]
     system_context_digest: SHA256Digest
 
 

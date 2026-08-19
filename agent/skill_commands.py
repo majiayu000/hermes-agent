@@ -540,9 +540,34 @@ def build_skill_invocation_message(
 
     loaded_skill, skill_dir, skill_name = loaded
 
-    # Track active usage for Curator lifecycle management (#17782)
+    return build_loaded_skill_invocation_message(
+        loaded_skill,
+        skill_name,
+        skill_dir=skill_dir,
+        user_instruction=user_instruction,
+        runtime_note=runtime_note,
+        session_id=task_id,
+    )
+
+
+def build_loaded_skill_invocation_message(
+    loaded_skill: dict[str, Any],
+    skill_name: str,
+    *,
+    skill_dir: Path | None = None,
+    user_instruction: str = "",
+    runtime_note: str = "",
+    session_id: str | None = None,
+) -> str:
+    """Build native Hermes invocation scaffolding from already verified bytes.
+
+    Runtime projections use this entry point so explicit product Skill
+    invocations enter conversation history in the same format as `/skill-name`
+    without re-reading a process-global Skill directory.
+    """
     try:
         from tools.skill_usage import bump_use
+
         bump_use(skill_name)
     except Exception:
         pass  # Non-critical — skill invocation proceeds regardless
@@ -557,7 +582,7 @@ def build_skill_invocation_message(
         activation_note,
         user_instruction=user_instruction,
         runtime_note=runtime_note,
-        session_id=task_id,
+        session_id=session_id,
     )
 
 

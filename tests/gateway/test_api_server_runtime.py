@@ -24,16 +24,13 @@ from gateway.api_server_shared import (
 from gateway.api_server_runtime import (
     APIServerRuntimeMixin,
     RuntimeBridgeSession,
-    _allowed_skills_prompt,
     _failed_tool_result_projection,
     _normalize_runtime_messages,
     _pin_run_model,
-    _replacement_system_prompt,
     _project_runtime_resume_attachments,
     _retry_session_db_history,
     _resume_session_db_history,
     _runtime_attachment_parts,
-    _runtime_attachment_reference_prompt,
     _runtime_failure_code,
     _runtime_allowed_skill_digests,
     _runtime_image_paths,
@@ -42,9 +39,15 @@ from gateway.api_server_runtime import (
     _runtime_history_tool_names,
     _runtime_video_paths,
     _runtime_tool_middleware,
-    _runtime_verified_activity_prompt,
     _validate_runtime_artifact_manifest,
 )
+from gateway.runtime_prompt_context import (
+    attachment_reference_prompt,
+    replacement_system_prompt,
+    verified_activity_prompt,
+)
+from gateway.runtime_skill_invocation import format_available_skills_prompt
+from gateway.runtime_skill_projection import projection_skill_metadata
 from agent.tool_dispatch_helpers import DeferredToolResult
 from model_tools import coerce_tool_args
 from hermes_state import SessionDB
@@ -60,7 +63,7 @@ def test_replacement_system_prompt_logs_only_safe_digest_diagnostics(caplog):
     caplog.set_level(logging.ERROR, logger="gateway.api_server_runtime")
 
     with pytest.raises(ValueError, match="system_context digest mismatch"):
-        _replacement_system_prompt({
+        replacement_system_prompt({
             "version": " prompt-v1 ",
             "mode": " replace ",
             "digest": "sha256:bad",
@@ -281,14 +284,14 @@ class _RuntimeAdapter(_TestRuntimeAdapter):
         )
         assert option_schema["required"] == ["label", "value"]
         assert agent.ephemeral_system_prompt is None
-        assert agent._cached_system_prompt == (
+        expected_system_prompt = (
             "platform rules\n\ntrusted turn context\n\n"
             "<available_skills>\n"
             "- media-qa: Inspect generated media.\n"
             "- planning-only: Plan media without a delegated tool.\n"
             "</available_skills>"
         )
-        assert agent._build_system_prompt() == agent._cached_system_prompt
+        assert agent._build_system_prompt() == expected_system_prompt
 
         kwargs["tool_start_callback"]("skill_call", "skill_view", {
             "name": "media-qa",
@@ -1410,7 +1413,7 @@ instructions
         }],
     }
 
-    prompt = _allowed_skills_prompt(
+    prompt = format_available_skills_prompt(
         {"storyboard-quick-preview"},
         _runtime_skill_projections(manifest),
     )
@@ -1461,8 +1464,8 @@ instructions
         ],
     }
     projections = _runtime_skill_projections(manifest)
-    metadata = runtime_module.projection_skill_metadata(projections)
-    prompt = _allowed_skills_prompt(
+    metadata = projection_skill_metadata(projections)
+    prompt = format_available_skills_prompt(
         {str(item["name"]) for item in metadata},
         metadata,
     )
@@ -2614,7 +2617,7 @@ async def test_runtime_driver_rejects_non_replacement_or_tampered_prompt():
         response = await client.post("/v1/runtime/runs", json=body)
         assert response.status == 422
         payload = await response.json()
-        assert "replacement" in payload["error"]["message"]
+        assert "mode is invalid" in payload["error"]["message"]
 
         body["system_context"]["mode"] = "replace"
         response = await client.post("/v1/runtime/runs", json=body)
@@ -2710,6 +2713,7 @@ async def test_runtime_retry_continues_existing_turn_without_new_user_message():
         "retry",
         intent="retry",
         context={"session_id": "thread_retry"},
+        invoked_skills=["historical-skill-no-longer-projected"],
         retry_context={"attempt": 2, "previous_error_code": "provider_timeout"},
     ))()
     assert status == 200
@@ -2732,7 +2736,7 @@ def test_runtime_message_validation_requires_stable_unique_ids_and_valid_roles()
 
 def test_runtime_typed_context_is_authenticated_and_never_message_content():
     messages = [{"message_id": "assistant-1", "role": "assistant", "content": "done"}]
-    activity_prompt = _runtime_verified_activity_prompt({
+    activity_prompt = verified_activity_prompt({
         "verified_activities": [{
             "message_id": "assistant-1",
             "source_run_id": "source-run",
@@ -2743,7 +2747,7 @@ def test_runtime_typed_context_is_authenticated_and_never_message_content():
             "digest": "sha256:" + "a" * 64,
         }],
     }, messages)
-    reference_prompt = _runtime_attachment_reference_prompt({
+    reference_prompt = attachment_reference_prompt({
         "generated_output": ["asset-output-1"],
         "user_upload": ["asset-upload-1"],
     })
@@ -2751,7 +2755,7 @@ def test_runtime_typed_context_is_authenticated_and_never_message_content():
     assert "asset-output-1" in reference_prompt
     assert all("source-run" not in message.get("content", "") for message in messages)
     with pytest.raises(ValueError, match="does not match an assistant"):
-        _runtime_verified_activity_prompt({
+        verified_activity_prompt({
             "verified_activities": [{
                 "message_id": "forged",
                 "source_run_id": "source-run",
@@ -2962,7 +2966,7 @@ async def test_runtime_handler_accepts_bounded_artifact_manifest_without_message
             projected = json.dumps({
                 "user_message": kwargs["user_message"],
                 "history": kwargs["conversation_history"],
-                "system": agent._cached_system_prompt,
+                "system": agent._build_system_prompt(),
             })
             assert "artifact-private-1" not in projected
             return {"final_response": "done"}, {}
