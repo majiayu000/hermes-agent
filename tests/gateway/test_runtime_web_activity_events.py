@@ -91,6 +91,33 @@ def test_web_extract_failure_reports_failed_status_without_arguments():
         session.loop.close()
 
 
+def test_nested_error_envelope_reports_failed_activity():
+    queue: asyncio.Queue = asyncio.Queue()
+    session = _make_session(queue)
+    try:
+        session.start_local_activity(
+            "call_va", "video_analyze", {"video_url": "private.mp4"}
+        )
+        session.complete_local_activity(
+            "call_va",
+            "video_analyze",
+            {"video_url": "private.mp4"},
+            '{"error":{"code":"repeated_non_retryable_tool_call",'
+            '"message":"The earlier video analysis failed.","retryable":false}}',
+        )
+        events = _drain(session, queue)
+        completed = events[1]["payload"]
+        assert completed["status"] == "failed"
+        assert completed["error"] == {
+            "code": "runtime_activity_failed",
+            "message": "The earlier video analysis failed.",
+            "retryable": False,
+        }
+        assert "private.mp4" not in str(events)
+    finally:
+        session.loop.close()
+
+
 def test_non_activity_tool_emits_nothing():
     queue: asyncio.Queue = asyncio.Queue()
     session = _make_session(queue)

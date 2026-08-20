@@ -61,6 +61,7 @@ from gateway.runtime_session_history import (
     runtime_history_tool_names as _runtime_history_tool_names,
     seed_runtime_session as _seed_runtime_session,
 )
+from gateway.runtime_activity import activity_failure_message as _activity_failure_message
 
 logger = logging.getLogger(__name__)
 
@@ -417,21 +418,6 @@ def _skill_body_digest(args: Any, result: Any) -> str:
     if not isinstance(content, str):
         return ""
     return "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-
-def _activity_failure_message(result: Any) -> str:
-    parsed = result
-    if isinstance(result, str):
-        try:
-            parsed = json.loads(result)
-        except (TypeError, json.JSONDecodeError):
-            return ""
-    if not isinstance(parsed, dict) or parsed.get("success") is not False:
-        return ""
-    message = parsed.get("error")
-    if not isinstance(message, str) or not message.strip():
-        return "runtime activity failed"
-    return message.strip()[:240]
 
 
 def _invalid_failed_tool_result() -> dict[str, Any]:
