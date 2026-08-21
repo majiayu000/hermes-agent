@@ -99,7 +99,7 @@ def test_explicit_runtime_skill_validation_fails_closed(invoked, match):
         )
 
 
-def test_thread_skill_catalog_is_stable_while_run_state_is_ephemeral(monkeypatch):
+def test_turn_skill_catalog_and_run_state_are_ephemeral(monkeypatch):
     monkeypatch.setattr("tools.skill_usage.bump_use", lambda _name: None)
     context = compile_runtime_skill_context(
         system_context=_system_context(),
@@ -116,7 +116,8 @@ def test_thread_skill_catalog_is_stable_while_run_state_is_ephemeral(monkeypatch
     )
 
     assert context.stable_instructions.startswith("ultra-agent-v1")
-    assert "<available_skills>" in context.stable_instructions
+    assert "<available_skills>" not in context.stable_instructions
     assert '"attempt":2' not in context.stable_instructions
+    assert "<available_skills>" in context.runtime_overlay
     assert '"attempt":2' in context.runtime_overlay
     assert "Pinned body v1." in context.invoked_messages[0][1]
