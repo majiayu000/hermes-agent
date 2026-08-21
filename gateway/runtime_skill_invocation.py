@@ -37,7 +37,7 @@ def format_available_skills_prompt(
     allowed_names: set[str],
     metadata: list[dict[str, Any]] | Mapping[str, RuntimeSkillProjection],
 ) -> str:
-    """Render the stable bootstrap index inside Hermes, not Orchestrator."""
+    """Render the current turn's routing index inside Hermes."""
     from gateway.ultrastudio_skill_routing import format_allowed_skills
 
     if isinstance(metadata, Mapping):
@@ -117,12 +117,10 @@ def compile_runtime_skill_context(
         if isinstance(item, dict) and str(item.get("name") or "").strip()
     }
     return CompiledRuntimeSkillContext(
-        stable_instructions=(
-            prompt_profile.text
-            + format_available_skills_prompt(selectable_names, routing_metadata)
-        ),
+        stable_instructions=prompt_profile.text,
         runtime_overlay=(
-            run_state_prompt(run_state)
+            format_available_skills_prompt(selectable_names, routing_metadata)
+            + run_state_prompt(run_state)
             + verified_activity_prompt(runtime_context, normalized_messages)
             + attachment_reference_prompt(attachment_references)
         ),

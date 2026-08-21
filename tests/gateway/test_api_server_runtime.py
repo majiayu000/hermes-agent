@@ -283,15 +283,15 @@ class _RuntimeAdapter(_TestRuntimeAdapter):
             ["properties"]["options"]["items"]
         )
         assert option_schema["required"] == ["label", "value"]
-        assert agent.ephemeral_system_prompt is None
-        expected_system_prompt = (
-            "platform rules\n\ntrusted turn context\n\n"
+        expected_skill_overlay = (
+            "\n\n"
             "<available_skills>\n"
             "- media-qa: Inspect generated media.\n"
             "- planning-only: Plan media without a delegated tool.\n"
             "</available_skills>"
         )
-        assert agent._build_system_prompt() == expected_system_prompt
+        assert agent.ephemeral_system_prompt == expected_skill_overlay
+        assert agent._build_system_prompt() == "platform rules\n\ntrusted turn context"
 
         kwargs["tool_start_callback"]("skill_call", "skill_view", {
             "name": "media-qa",
