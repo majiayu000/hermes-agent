@@ -705,6 +705,59 @@ class TestCheckWebApiKey:
                     assert check_web_api_key() is True
 
 
+class TestCheckWebExtractAvailable:
+    """The extract schema must only be advertised by an extract provider."""
+
+    def test_search_only_provider_does_not_enable_extract(self):
+        from tools.web_capability_checks import check_web_extract_available
+
+        provider = MagicMock()
+        provider.supports_extract.return_value = False
+        provider.name = "ddgs"
+        with patch("tools.web_tools._ensure_web_plugins_loaded"), patch(
+            "agent.web_search_registry.get_active_extract_provider",
+            return_value=provider,
+        ):
+            assert check_web_extract_available() is False
+        provider.is_available.assert_not_called()
+
+    def test_available_extract_provider_enables_extract(self):
+        from tools.web_capability_checks import check_web_extract_available
+
+        provider = MagicMock()
+        provider.supports_extract.return_value = True
+        provider.is_available.return_value = True
+        provider.name = "firecrawl"
+        with patch("tools.web_tools._ensure_web_plugins_loaded"), patch(
+            "agent.web_search_registry.get_active_extract_provider",
+            return_value=provider,
+        ):
+            assert check_web_extract_available() is True
+
+    def test_unconfigured_extract_provider_is_unavailable(self):
+        import tools.web_tools
+        from tools.web_capability_checks import check_web_extract_available
+        from tools.registry import invalidate_check_fn_cache
+
+        search_entry = tools.web_tools.registry.get_entry("web_search")
+        extract_entry = tools.web_tools.registry.get_entry("web_extract")
+        assert search_entry.check_fn is tools.web_tools.check_web_api_key
+        assert extract_entry.check_fn is check_web_extract_available
+
+        with patch("tools.web_tools._ensure_web_plugins_loaded"), patch(
+            "agent.web_search_registry.get_active_extract_provider",
+            return_value=None,
+        ):
+            assert check_web_extract_available() is False
+            invalidate_check_fn_cache()
+            definitions = tools.web_tools.registry.get_definitions(
+                {"web_search", "web_extract"}, quiet=True
+            )
+
+        names = {definition["function"]["name"] for definition in definitions}
+        assert "web_extract" not in names
+
+
 def test_web_requires_env_includes_exa_key():
     from tools.web_tools import _web_requires_env
 
