@@ -332,7 +332,7 @@ class TestVideoAnalyzeTool:
         content = messages[0]["content"]
         assert len(content) == 7
         assert content[0]["type"] == "text"
-        assert "sampled server-side" in content[0]["text"]
+        assert "sampled server-side across its timeline" in content[0]["text"]
         assert [part["type"] for part in content[1:]] == [
             "text", "image_url", "text", "image_url", "text", "image_url",
         ]

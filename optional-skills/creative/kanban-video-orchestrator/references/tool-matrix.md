@@ -83,7 +83,7 @@ toolsets. Enable them per-profile by adding the toolset to the profile config.
 
 | Tool | Toolset | What it does | Profile that uses it |
 |------|---------|--------------|----------------------|
-| `video_analyze` | `video` (opt-in — `hermes tools enable video`) | Server-side video review — resolves the source once, extracts bounded representative JPEG frames at 15%, 50%, and 85% with timestamps, and sends those frames to the auxiliary vision model. Supports mp4, webm, mov, avi, mkv. 50 MB source cap. Model: `AUXILIARY_VIDEO_MODEL` env → `AUXILIARY_VISION_MODEL` fallback. | reviewer, cinematographer, editor |
+| `video_analyze` | `video` (opt-in — `hermes tools enable video`) | Server-side video review — resolves the source once, extracts duration-aware JPEG timeline samples at an approximately 2.5-second target interval (3–24 frames) with timestamps, and sends those frames to the auxiliary vision model. Supports mp4, webm, mov, avi, mkv. 50 MB source cap. Model: `AUXILIARY_VIDEO_MODEL` env → `AUXILIARY_VISION_MODEL` fallback. | reviewer, cinematographer, editor |
 | `image_analyze` | `vision` (core — enabled by default) | Image/frame analysis — review stills, thumbnails, exported frames. Already available to all profiles without opt-in. | reviewer, cinematographer, concept-artist |
 
 ## Standard toolset configurations per role

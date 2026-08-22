@@ -1,15 +1,18 @@
-"""Bounded server-side frame extraction for native video analysis."""
+"""Bounded, duration-aware server-side frame extraction for video analysis."""
 
 from __future__ import annotations
 
 import base64
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
 from agent.video_post.ffmpeg import FfmpegError, probe_media, run_ffmpeg
 
 
-FRAME_RATIOS = (0.15, 0.5, 0.85)
+TARGET_FRAME_INTERVAL_SECONDS = 2.5
+MIN_FRAME_COUNT = 3
+MAX_FRAME_COUNT = 24
 _FRAME_EDGE_PX = 1280
 _FRAME_TIMEOUT_SECONDS = 60.0
 
@@ -25,11 +28,22 @@ class ExtractedVideoFrame:
     ratio: float
 
 
+def plan_video_frame_ratios(duration_seconds: float) -> tuple[float, ...]:
+    """Plan bounded, evenly distributed timeline samples for a video duration."""
+    if duration_seconds <= 0:
+        raise VideoFrameExtractionError("Video duration must be greater than zero.")
+    frame_count = min(
+        MAX_FRAME_COUNT,
+        max(MIN_FRAME_COUNT, math.ceil(duration_seconds / TARGET_FRAME_INTERVAL_SECONDS)),
+    )
+    return tuple((index + 0.5) / frame_count for index in range(frame_count))
+
+
 def extract_video_frames(
     video_path: Path,
     output_dir: Path,
 ) -> list[ExtractedVideoFrame]:
-    """Extract three bounded JPEG frames at stable positions in the source video."""
+    """Extract a bounded, duration-aware set of JPEG timeline samples."""
     source = video_path.resolve()
     destination = output_dir.resolve()
     destination.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -44,8 +58,9 @@ def extract_video_frames(
             "Video must contain a valid video stream and duration."
         )
 
+    frame_ratios = plan_video_frame_ratios(duration)
     frames: list[ExtractedVideoFrame] = []
-    for index, ratio in enumerate(FRAME_RATIOS, start=1):
+    for index, ratio in enumerate(frame_ratios, start=1):
         timestamp = min(max(0.0, duration * ratio), max(0.0, duration - 0.001))
         frame_path = destination / f"frame-{index}.jpg"
         try:
@@ -70,11 +85,11 @@ def extract_video_frames(
             )
         except FfmpegError as exc:
             raise VideoFrameExtractionError(
-                f"Unable to extract representative video frame {index}: {exc}"
+                f"Unable to extract video timeline frame {index}: {exc}"
             ) from exc
         if not frame_path.is_file() or frame_path.stat().st_size <= 0:
             raise VideoFrameExtractionError(
-                f"Video frame extraction did not produce a JPEG for frame {index}."
+                f"Video timeline extraction did not produce a JPEG for frame {index}."
             )
         frames.append(
             ExtractedVideoFrame(
@@ -95,8 +110,8 @@ def build_video_frame_analysis_message(
         "type": "text",
         "text": (
             f"{user_prompt}\n\n"
-            "The source video was sampled server-side at the labeled timestamps. "
-            "Analyze only what these representative frames support, preserve their "
+            "The source video was sampled server-side across its timeline at the "
+            "labeled timestamps. Analyze only what these frames support, preserve their "
             "chronological order, and disclose when a conclusion would require "
             "unsampled motion or timing."
         ),
@@ -105,7 +120,7 @@ def build_video_frame_analysis_message(
         content.append({
             "type": "text",
             "text": (
-                f"Representative frame {index}/{len(frames)} at "
+                f"Timeline frame {index}/{len(frames)} at "
                 f"{_format_timestamp(frame.timestamp_seconds)} "
                 f"({frame.ratio:.0%} of source duration)."
             ),

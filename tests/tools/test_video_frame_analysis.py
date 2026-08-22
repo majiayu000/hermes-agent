@@ -4,13 +4,46 @@ from unittest.mock import patch
 import pytest
 
 from tools.video_frame_analysis import (
-    FRAME_RATIOS,
+    MAX_FRAME_COUNT,
+    MIN_FRAME_COUNT,
+    TARGET_FRAME_INTERVAL_SECONDS,
     VideoFrameExtractionError,
     extract_video_frames,
+    plan_video_frame_ratios,
 )
 
 
-def test_extract_video_frames_uses_bounded_server_side_sampling(tmp_path):
+@pytest.mark.parametrize(
+    ("duration", "expected_count"),
+    [
+        (1.0, MIN_FRAME_COUNT),
+        (7.5, 3),
+        (10.0, 4),
+        (30.0, 12),
+        (60.0, MAX_FRAME_COUNT),
+        (600.0, MAX_FRAME_COUNT),
+    ],
+)
+def test_plan_video_frame_ratios_adapts_to_duration_with_a_hard_cap(
+    duration,
+    expected_count,
+):
+    ratios = plan_video_frame_ratios(duration)
+
+    assert TARGET_FRAME_INTERVAL_SECONDS == 2.5
+    assert len(ratios) == expected_count
+    assert list(ratios) == sorted(ratios)
+    assert all(0 < ratio < 1 for ratio in ratios)
+    assert ratios[0] == pytest.approx(0.5 / expected_count)
+    assert ratios[-1] == pytest.approx((expected_count - 0.5) / expected_count)
+
+
+def test_plan_video_frame_ratios_rejects_non_positive_duration():
+    with pytest.raises(VideoFrameExtractionError, match="greater than zero"):
+        plan_video_frame_ratios(0)
+
+
+def test_extract_video_frames_uses_duration_aware_server_side_sampling(tmp_path):
     video_path = tmp_path / "source.mp4"
     video_path.write_bytes(b"video")
     output_dir = tmp_path / "frames"
@@ -23,18 +56,18 @@ def test_extract_video_frames_uses_bounded_server_side_sampling(tmp_path):
 
     with patch(
         "tools.video_frame_analysis.probe_media",
-        return_value={"has_video": True, "duration": 100.0},
+        return_value={"has_video": True, "duration": 10.0},
     ), patch("tools.video_frame_analysis.run_ffmpeg", side_effect=fake_run):
         frames = extract_video_frames(video_path, output_dir)
 
-    assert FRAME_RATIOS == (0.15, 0.5, 0.85)
-    assert [frame.timestamp_seconds for frame in frames] == [15.0, 50.0, 85.0]
-    assert [frame.ratio for frame in frames] == list(FRAME_RATIOS)
+    assert [frame.timestamp_seconds for frame in frames] == [1.25, 3.75, 6.25, 8.75]
+    assert [frame.ratio for frame in frames] == [0.125, 0.375, 0.625, 0.875]
     assert all(frame.path.read_bytes() == b"jpeg" for frame in frames)
     assert [command[command.index("-ss") + 1] for command in commands] == [
-        "15.000",
-        "50.000",
-        "85.000",
+        "1.250",
+        "3.750",
+        "6.250",
+        "8.750",
     ]
     assert all("scale=1280:1280:force_original_aspect_ratio=decrease" in command for command in commands)
 
