@@ -57,4 +57,5 @@
 3. 本地路径、HTTPS 下载及解析后的 `asset_id`/`output_id` 均复用同一函数。
 4. ffmpeg/ffprobe 不可用或没有有效视频流时明确失败，且不调用 LLM。
 5. Panel 视频提交不再生成 `.frame-N.jpg` 附件。
-6. Hermes 聚焦测试、Hermes 全量验证和 Panel `npm run verify` 通过。
+6. Hermes 视频与 Runtime 媒体相关测试、真实 ffmpeg 烟测和 Panel
+   `npm run verify` 通过；无关 Hermes 全量套件留给 CI。
