@@ -990,10 +990,10 @@ def _runtime_attachment_parts(
                 "text": (
                     f"[Attached video: {filename}; role={role}; "
                     f"{identity_label}={reference_id}. "
-                    "Analyze the complete source video with video_analyze using "
+                    "Analyze the source video with video_analyze using "
                     f"video_url={video_path} and include_transcript=true. "
-                    "Representative frames, when present, "
-                    "are supplementary rather than the source of truth.]"
+                    "The tool performs authoritative server-side frame sampling "
+                    "and reports its temporal coverage.]"
                 ),
                 "_runtime_reference_id": reference_id,
                 "_runtime_video_path": str(video_path),

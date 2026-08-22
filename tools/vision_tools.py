@@ -33,6 +33,7 @@ import base64
 import json
 import logging
 import os
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Dict, Optional
@@ -41,6 +42,7 @@ import httpx
 from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
 from hermes_constants import get_hermes_dir
 from tools.debug_helpers import DebugSession
+from tools.video_frame_analysis import build_video_frame_analysis_message, extract_video_frames
 from tools.website_policy import check_website_access
 import sys
 
@@ -1053,7 +1055,7 @@ _VIDEO_MIME_TYPES = {
     ".mpg": "video/mpeg",
 }
 
-_MAX_VIDEO_BASE64_BYTES = 50 * 1024 * 1024  # 50 MB hard cap
+_MAX_VIDEO_SOURCE_BYTES = 50 * 1024 * 1024
 _VIDEO_SIZE_WARN_BYTES = 20 * 1024 * 1024
 
 
@@ -1061,14 +1063,6 @@ def _detect_video_mime_type(video_path: Path) -> Optional[str]:
     """Return a video MIME type based on file extension, or None if unsupported."""
     ext = video_path.suffix.lower()
     return _VIDEO_MIME_TYPES.get(ext)
-
-
-def _video_to_base64_data_url(video_path: Path, mime_type: Optional[str] = None) -> str:
-    """Convert a video file to a base64-encoded data URL."""
-    data = video_path.read_bytes()
-    encoded = base64.b64encode(data).decode("ascii")
-    mime = mime_type or _VIDEO_MIME_TYPES.get(video_path.suffix.lower(), "video/mp4")
-    return f"data:{mime};base64,{encoded}"
 
 
 async def _download_video(video_url: str, destination: Path, max_retries: int = 3) -> Path:
@@ -1108,9 +1102,9 @@ async def _download_video(video_url: str, destination: Path, max_retries: int = 
                 response.raise_for_status()
 
                 cl = response.headers.get("content-length")
-                if cl and int(cl) > _MAX_VIDEO_BASE64_BYTES:
+                if cl and int(cl) > _MAX_VIDEO_SOURCE_BYTES:
                     raise ValueError(
-                        f"Video too large ({int(cl)} bytes, max {_MAX_VIDEO_BASE64_BYTES})"
+                        f"Video too large ({int(cl)} bytes, max {_MAX_VIDEO_SOURCE_BYTES})"
                     )
 
                 final_url = str(response.url)
@@ -1119,9 +1113,9 @@ async def _download_video(video_url: str, destination: Path, max_retries: int = 
                     raise PermissionError(blocked["message"])
 
                 body = response.content
-                if len(body) > _MAX_VIDEO_BASE64_BYTES:
+                if len(body) > _MAX_VIDEO_SOURCE_BYTES:
                     raise ValueError(
-                        f"Video too large ({len(body)} bytes, max {_MAX_VIDEO_BASE64_BYTES})"
+                        f"Video too large ({len(body)} bytes, max {_MAX_VIDEO_SOURCE_BYTES})"
                     )
                 destination.write_bytes(body)
 
@@ -1220,35 +1214,7 @@ async def video_analyze_tool(
         if video_size_bytes > _VIDEO_SIZE_WARN_BYTES:
             logger.warning("Video is %.1f MB — may be slow or rejected", video_size_mb)
 
-        video_data_url = _video_to_base64_data_url(temp_video_path, mime_type=detected_mime)
-        data_size_mb = len(video_data_url) / (1024 * 1024)
-
-        if len(video_data_url) > _MAX_VIDEO_BASE64_BYTES:
-            raise ValueError(
-                f"Video too large for API: base64 payload is {data_size_mb:.1f} MB "
-                f"(limit {_MAX_VIDEO_BASE64_BYTES / (1024 * 1024):.0f} MB). "
-                f"Compress or trim the video and retry."
-            )
-
         debug_call_data["video_size_bytes"] = video_size_bytes
-
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": user_prompt,
-                    },
-                    {
-                        "type": "video_url",
-                        "video_url": {
-                            "url": video_data_url,
-                        },
-                    },
-                ],
-            }
-        ]
 
         vision_timeout = 180.0
         vision_temperature = 0.1
@@ -1265,17 +1231,28 @@ async def video_analyze_tool(
         except Exception:
             pass
 
-        call_kwargs = {
-            "task": "vision",
-            "messages": messages,
-            "temperature": vision_temperature,
-            "max_tokens": 4000,
-            "timeout": vision_timeout,
-        }
-        if model:
-            call_kwargs["model"] = model
-
-        response = await async_call_llm(**call_kwargs)
+        frame_cache_dir = get_hermes_dir("cache/video_frames", "video_frame_files")
+        frame_cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="analysis-",
+            dir=frame_cache_dir,
+        ) as raw_frame_dir:
+            frames = await asyncio.to_thread(
+                extract_video_frames,
+                temp_video_path,
+                Path(raw_frame_dir),
+            )
+            messages = [build_video_frame_analysis_message(user_prompt, frames)]
+            call_kwargs = {
+                "task": "vision",
+                "messages": messages,
+                "temperature": vision_temperature,
+                "max_tokens": 4000,
+                "timeout": vision_timeout,
+            }
+            if model:
+                call_kwargs["model"] = model
+            response = await async_call_llm(**call_kwargs)
         analysis = extract_content_or_reasoning(response)
 
         if not analysis:
@@ -1287,6 +1264,13 @@ async def video_analyze_tool(
         result = {
             "success": True,
             "analysis": analysis or "There was a problem with the request and the video could not be analyzed.",
+            "sampled_frames": [
+                {
+                    "timestamp_seconds": round(frame.timestamp_seconds, 3),
+                    "ratio": frame.ratio,
+                }
+                for frame in frames
+            ],
         }
         if include_transcript:
             try:
@@ -1354,11 +1338,11 @@ async def video_analyze_tool(
 VIDEO_ANALYZE_SCHEMA = {
     "name": "video_analyze",
     "description": (
-        "Analyze a video from a URL or local file path using a multimodal AI model. "
-        "Sends the video to a video-capable model (e.g. Gemini) for understanding. "
+        "Analyze a video from a URL or local file path using bounded server-side "
+        "representative frames and a multimodal AI model. "
         "Use this for video files — for images, use image_analyze instead. "
         "Supports mp4, webm, mov, avi, mkv, mpeg formats. "
-        "Note: large videos (>20 MB) may be slow; max ~50 MB."
+        "The result reports the sampled timestamps; source videos are capped at 50 MB."
     ),
     "parameters": {
         "type": "object",
@@ -1369,7 +1353,7 @@ VIDEO_ANALYZE_SCHEMA = {
             },
             "question": {
                 "type": "string",
-                "description": "Your specific question about the video. The AI will describe what happens in the video and answer your question.",
+                "description": "Your specific question about the video's sampled visual timeline.",
             },
             "include_transcript": {
                 "type": "boolean",
@@ -1390,9 +1374,9 @@ def _handle_video_analyze(args: Dict[str, Any], **kw: Any) -> Awaitable[str]:
     question = args.get("question", "")
     include_transcript = args.get("include_transcript") is True
     full_prompt = (
-        "Fully describe and explain everything happening in this video, "
-        "including visual content, motion, audio cues, text overlays, and scene "
-        f"transitions. Then answer the following question:\n\n{question}"
+        "Describe visible content, text, subjects, settings, and changes across the "
+        "sampled video timeline. Do not claim unsampled motion, timing, audio, or "
+        f"transitions as observed. Then answer this question:\n\n{question}"
     )
     model = os.getenv("AUXILIARY_VIDEO_MODEL", "").strip() or os.getenv("AUXILIARY_VISION_MODEL", "").strip() or None
     return video_analyze_tool(video_url, full_prompt, model, include_transcript)

@@ -536,9 +536,9 @@ def test_runtime_attachment_parts_materialize_video_for_native_analysis(tmp_path
         "type": "text",
         "text": (
             f"[Attached video: ../../clip.mp4; role=user_upload; asset_id=asset_video. "
-            f"Analyze the complete source video with video_analyze using video_url={video_path} "
+            f"Analyze the source video with video_analyze using video_url={video_path} "
             "and include_transcript=true. "
-            "Representative frames, when present, are supplementary rather than the source of truth.]"
+            "The tool performs authoritative server-side frame sampling and reports its temporal coverage.]"
         ),
         "_runtime_reference_id": "asset_video",
         "_runtime_video_path": str(video_path),

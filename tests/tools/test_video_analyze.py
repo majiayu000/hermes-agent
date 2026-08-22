@@ -4,12 +4,10 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
-
+from tools.video_frame_analysis import ExtractedVideoFrame, VideoFrameExtractionError
 from tools.vision_tools import (
     _detect_video_mime_type,
-    _video_to_base64_data_url,
     _handle_video_analyze,
-    _MAX_VIDEO_BASE64_BYTES,
     video_analyze_tool,
     VIDEO_ANALYZE_SCHEMA,
 )
@@ -67,34 +65,6 @@ class TestDetectVideoMimeType:
         p = tmp_path / "clip.MP4"
         p.write_bytes(b"\x00" * 10)
         assert _detect_video_mime_type(p) == "video/mp4"
-
-
-# ---------------------------------------------------------------------------
-# _video_to_base64_data_url
-# ---------------------------------------------------------------------------
-
-
-class TestVideoToBase64DataUrl:
-    """Base64 encoding of video files."""
-
-    def test_produces_data_url(self, tmp_path):
-        p = tmp_path / "test.mp4"
-        p.write_bytes(b"\x00\x01\x02\x03")
-        result = _video_to_base64_data_url(p)
-        assert result.startswith("data:video/mp4;base64,")
-
-    def test_custom_mime_type(self, tmp_path):
-        p = tmp_path / "test.webm"
-        p.write_bytes(b"\x00\x01\x02\x03")
-        result = _video_to_base64_data_url(p, mime_type="video/webm")
-        assert result.startswith("data:video/webm;base64,")
-
-    def test_default_mime_for_unknown_ext(self, tmp_path):
-        p = tmp_path / "test.xyz"
-        p.write_bytes(b"\x00\x01\x02\x03")
-        result = _video_to_base64_data_url(p)
-        # Falls back to video/mp4
-        assert result.startswith("data:video/mp4;base64,")
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +159,18 @@ class TestVideoAnalyzeTool:
     def _run(self, coro):
         return asyncio.get_event_loop().run_until_complete(coro)
 
+    @staticmethod
+    def _sampled_frames(tmp_path):
+        frames = []
+        for index, (timestamp, ratio) in enumerate(
+            ((1.5, 0.15), (5.0, 0.5), (8.5, 0.85)),
+            start=1,
+        ):
+            path = tmp_path / f"frame-{index}.jpg"
+            path.write_bytes(f"jpeg-{index}".encode())
+            frames.append(ExtractedVideoFrame(path, timestamp, ratio))
+        return frames
+
     def test_local_file_success(self, tmp_path, monkeypatch):
         """Analyze a local video file — happy path."""
         video = tmp_path / "demo.mp4"
@@ -198,13 +180,27 @@ class TestVideoAnalyzeTool:
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "A short video showing a demo."
 
-        with patch("tools.vision_tools.async_call_llm", new_callable=AsyncMock, return_value=mock_response):
-            with patch("tools.vision_tools.extract_content_or_reasoning", return_value="A short video showing a demo."):
-                result = self._run(video_analyze_tool(str(video), "What is this?"))
+        with patch(
+            "tools.vision_tools.extract_video_frames",
+            return_value=self._sampled_frames(tmp_path),
+        ), patch(
+            "tools.vision_tools.async_call_llm",
+            new_callable=AsyncMock,
+            return_value=mock_response,
+        ), patch(
+            "tools.vision_tools.extract_content_or_reasoning",
+            return_value="A short video showing a demo.",
+        ):
+            result = self._run(video_analyze_tool(str(video), "What is this?"))
 
         data = json.loads(result)
         assert data["success"] is True
         assert "demo" in data["analysis"].lower()
+        assert data["sampled_frames"] == [
+            {"timestamp_seconds": 1.5, "ratio": 0.15},
+            {"timestamp_seconds": 5.0, "ratio": 0.5},
+            {"timestamp_seconds": 8.5, "ratio": 0.85},
+        ]
 
     def test_local_file_not_found(self, tmp_path):
         """Non-existent file raises appropriate error."""
@@ -226,22 +222,22 @@ class TestVideoAnalyzeTool:
         assert "unsupported video format" in data["analysis"].lower()
         assert data["retryable"] is False
 
-    def test_video_too_large(self, tmp_path, monkeypatch):
-        """Video exceeding max size is rejected."""
-        video = tmp_path / "huge.mp4"
-        # Don't actually write 50MB — mock the stat
+    def test_frame_extraction_failure_prevents_provider_submission(self, tmp_path):
+        video = tmp_path / "invalid.mp4"
         video.write_bytes(b"\x00" * 100)
 
-        # Patch the base64 encoding to return something huge
-        with patch("tools.vision_tools._video_to_base64_data_url") as mock_encode:
-            mock_encode.return_value = "data:video/mp4;base64," + "A" * (_MAX_VIDEO_BASE64_BYTES + 1)
+        with patch(
+            "tools.vision_tools.extract_video_frames",
+            side_effect=VideoFrameExtractionError("ffprobe binary not found"),
+        ), patch("tools.vision_tools.async_call_llm", new_callable=AsyncMock) as llm:
             result = self._run(video_analyze_tool(str(video), "What?"))
 
         data = json.loads(result)
         assert data["success"] is False
-        assert "too large" in data["analysis"].lower()
-        assert data["error_code"] == "video_analysis_input_too_large"
+        assert "ffprobe binary not found" in data["analysis"].lower()
+        assert data["error_code"] == "video_analysis_failed"
         assert data["retryable"] is False
+        llm.assert_not_awaited()
 
     def test_interrupt_check(self, tmp_path):
         """Tool respects interrupt flag."""
@@ -271,9 +267,14 @@ class TestVideoAnalyzeTool:
             call_count += 1
             return mock_response
 
-        with patch("tools.vision_tools.async_call_llm", side_effect=fake_llm):
-            with patch("tools.vision_tools.extract_content_or_reasoning", return_value=""):
-                result = self._run(video_analyze_tool(str(video), "What?"))
+        with patch(
+            "tools.vision_tools.extract_video_frames",
+            return_value=self._sampled_frames(tmp_path),
+        ), patch("tools.vision_tools.async_call_llm", side_effect=fake_llm), patch(
+            "tools.vision_tools.extract_content_or_reasoning",
+            return_value="",
+        ):
+            result = self._run(video_analyze_tool(str(video), "What?"))
 
         data = json.loads(result)
         assert data["success"] is False
@@ -290,15 +291,21 @@ class TestVideoAnalyzeTool:
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "OK"
 
-        with patch("tools.vision_tools.async_call_llm", new_callable=AsyncMock, return_value=mock_response):
-            with patch("tools.vision_tools.extract_content_or_reasoning", return_value="OK"):
-                result = self._run(video_analyze_tool(f"file://{video}", "What?"))
+        with patch(
+            "tools.vision_tools.extract_video_frames",
+            return_value=self._sampled_frames(tmp_path),
+        ), patch(
+            "tools.vision_tools.async_call_llm",
+            new_callable=AsyncMock,
+            return_value=mock_response,
+        ), patch("tools.vision_tools.extract_content_or_reasoning", return_value="OK"):
+            result = self._run(video_analyze_tool(f"file://{video}", "What?"))
 
         data = json.loads(result)
         assert data["success"] is True
 
     def test_api_message_format(self, tmp_path):
-        """Verify the message sent to LLM uses video_url content type."""
+        """The LLM receives timestamped JPEG samples, never the complete video."""
         video = tmp_path / "test.mp4"
         video.write_bytes(b"\x00" * 100)
 
@@ -311,18 +318,32 @@ class TestVideoAnalyzeTool:
             mock_response.choices[0].message.content = "OK"
             return mock_response
 
-        with patch("tools.vision_tools.async_call_llm", side_effect=capture_llm):
-            with patch("tools.vision_tools.extract_content_or_reasoning", return_value="OK"):
-                self._run(video_analyze_tool(str(video), "Describe this"))
+        with patch(
+            "tools.vision_tools.extract_video_frames",
+            return_value=self._sampled_frames(tmp_path),
+        ), patch("tools.vision_tools.async_call_llm", side_effect=capture_llm), patch(
+            "tools.vision_tools.extract_content_or_reasoning",
+            return_value="OK",
+        ):
+            self._run(video_analyze_tool(str(video), "Describe this"))
 
         messages = captured_kwargs["messages"]
         assert len(messages) == 1
         content = messages[0]["content"]
-        assert len(content) == 2
+        assert len(content) == 7
         assert content[0]["type"] == "text"
-        assert content[1]["type"] == "video_url"
-        assert "video_url" in content[1]
-        assert content[1]["video_url"]["url"].startswith("data:video/mp4;base64,")
+        assert "sampled server-side" in content[0]["text"]
+        assert [part["type"] for part in content[1:]] == [
+            "text", "image_url", "text", "image_url", "text", "image_url",
+        ]
+        assert "00:01.500" in content[1]["text"]
+        assert "00:05.000" in content[3]["text"]
+        assert "00:08.500" in content[5]["text"]
+        assert all(
+            part["image_url"]["url"].startswith("data:image/jpeg;base64,")
+            for part in content[2::2]
+        )
+        assert all(part["type"] != "video_url" for part in content)
 
     def test_optional_audio_transcription_is_returned_explicitly(self, tmp_path):
         video = tmp_path / "test.mp4"
@@ -331,23 +352,29 @@ class TestVideoAnalyzeTool:
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "Visual analysis."
 
-        with patch("tools.vision_tools.async_call_llm", new_callable=AsyncMock, return_value=mock_response):
-            with patch("tools.vision_tools.extract_content_or_reasoning", return_value="Visual analysis."):
-                with patch(
-                    "tools.transcription_tools.transcribe_audio",
-                    return_value={
-                        "success": True,
-                        "transcript": "Exact spoken words.",
-                        "provider": "local",
-                    },
-                ):
-                    result = self._run(
-                        video_analyze_tool(
-                            str(video),
-                            "Describe this",
-                            include_transcript=True,
-                        )
+        with patch(
+            "tools.vision_tools.extract_video_frames",
+            return_value=self._sampled_frames(tmp_path),
+        ), patch(
+            "tools.vision_tools.async_call_llm",
+            new_callable=AsyncMock,
+            return_value=mock_response,
+        ), patch("tools.vision_tools.extract_content_or_reasoning", return_value="Visual analysis."):
+            with patch(
+                "tools.transcription_tools.transcribe_audio",
+                return_value={
+                    "success": True,
+                    "transcript": "Exact spoken words.",
+                    "provider": "local",
+                },
+            ):
+                result = self._run(
+                    video_analyze_tool(
+                        str(video),
+                        "Describe this",
+                        include_transcript=True,
                     )
+                )
 
         data = json.loads(result)
         assert data["success"] is True
@@ -364,23 +391,29 @@ class TestVideoAnalyzeTool:
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
 
-        with patch("tools.vision_tools.async_call_llm", new_callable=AsyncMock, return_value=mock_response):
-            with patch("tools.vision_tools.extract_content_or_reasoning", return_value="Visual analysis."):
-                with patch(
-                    "tools.transcription_tools.transcribe_audio",
-                    return_value={
-                        "success": False,
-                        "transcript": "",
-                        "error": "STT is disabled",
-                    },
-                ):
-                    result = self._run(
-                        video_analyze_tool(
-                            str(video),
-                            "Describe this",
-                            include_transcript=True,
-                        )
+        with patch(
+            "tools.vision_tools.extract_video_frames",
+            return_value=self._sampled_frames(tmp_path),
+        ), patch(
+            "tools.vision_tools.async_call_llm",
+            new_callable=AsyncMock,
+            return_value=mock_response,
+        ), patch("tools.vision_tools.extract_content_or_reasoning", return_value="Visual analysis."):
+            with patch(
+                "tools.transcription_tools.transcribe_audio",
+                return_value={
+                    "success": False,
+                    "transcript": "",
+                    "error": "STT is disabled",
+                },
+            ):
+                result = self._run(
+                    video_analyze_tool(
+                        str(video),
+                        "Describe this",
+                        include_transcript=True,
                     )
+                )
 
         data = json.loads(result)
         assert data["success"] is True
