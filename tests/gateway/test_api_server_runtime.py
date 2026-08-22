@@ -462,8 +462,8 @@ def test_runtime_attachment_parts_preserve_and_materialize_image_pixels(tmp_path
         "text": (
             "[Attached image: product.png; role=product_photo; asset_id=asset_image. "
             "When pixel analysis is required, call image_analyze with "
-            f"image_url={image_path}. Keep this private runtime path out "
-            "of the final answer.]"
+            "image_url=asset_image. The Runtime resolves this opaque, "
+            "run-bound reference to its private materialized file.]"
         ),
         "_runtime_reference_id": "asset_image",
         "_runtime_image_path": str(image_path),
@@ -499,6 +499,8 @@ def test_runtime_attachment_parts_materialize_generated_output_reference(tmp_pat
     assert image_path.name == hashlib.sha256(b"output_board").hexdigest()[:24] + ".png"
     assert image_path.read_bytes() == b"generated-pixels"
     assert "reference_id=output_board" in parts[0]["text"]
+    assert "image_url=output_board" in parts[0]["text"]
+    assert str(image_path) not in parts[0]["text"]
     assert "asset_id=" not in parts[0]["text"]
 
 
@@ -535,10 +537,11 @@ def test_runtime_attachment_parts_materialize_video_for_native_analysis(tmp_path
     assert parts == [{
         "type": "text",
         "text": (
-            f"[Attached video: ../../clip.mp4; role=user_upload; asset_id=asset_video. "
-            f"Analyze the source video with video_analyze using video_url={video_path} "
-            "and include_transcript=true. "
-            "The tool performs authoritative server-side frame sampling and reports its temporal coverage.]"
+            "[Attached video: ../../clip.mp4; role=user_upload; asset_id=asset_video. "
+            "Analyze the source video with video_analyze using video_url=asset_video "
+            "and include_transcript=true. The Runtime resolves this opaque, "
+            "run-bound reference to its private materialized file. The tool performs "
+            "authoritative server-side frame sampling and reports its temporal coverage.]"
         ),
         "_runtime_reference_id": "asset_video",
         "_runtime_video_path": str(video_path),
@@ -984,15 +987,21 @@ async def test_runtime_bridge_delivers_image_attachment_as_multimodal_user_conte
                 for part in kwargs["user_message"]
                 if part.get("type") == "text" and "image_url=" in part.get("text", "")
             )
-            image_path = marker.split("image_url=", 1)[1].split(". Keep", 1)[0]
-            captured["image_path"] = image_path
-            assert Path(image_path).read_bytes() == b"png-bytes"
+            image_reference = marker.split("image_url=", 1)[1].split(".", 1)[0]
+            assert image_reference == "asset_image"
+
+            def analyze_image(tool_args):
+                image_path = tool_args["image_url"]
+                captured["image_path"] = image_path
+                assert Path(image_path).read_bytes() == b"png-bytes"
+                return '{"success":true,"analysis":"visible"}'
+
             result = _runtime_tool_middleware(
                 tool_name="image_analyze",
-                args={"image_url": image_path, "question": "Describe it"},
+                args={"image_url": image_reference, "question": "Describe it"},
                 session_id=kwargs["session_id"],
                 tool_call_id="image_call",
-                next_call=lambda _args: '{"success":true,"analysis":"visible"}',
+                next_call=analyze_image,
             )
             assert json.loads(result)["analysis"] == "visible"
             return {"final_response": "seen"}, {"total_tokens": 1}
@@ -1076,15 +1085,21 @@ async def test_runtime_bridge_exposes_scoped_video_analysis_and_cleans_source_fi
                 for part in content
                 if part.get("type") == "text" and "video_url=" in part.get("text", "")
             )
-            video_path = marker.split("video_url=", 1)[1].split(".", 1)[0] + ".mp4"
-            captured["video_path"] = video_path
-            assert Path(video_path).read_bytes() == b"complete-video"
+            video_reference = marker.split("video_url=", 1)[1].split(" ", 1)[0]
+            assert video_reference == "asset_video"
+
+            def analyze_video(tool_args):
+                video_path = tool_args["video_url"]
+                captured["video_path"] = video_path
+                assert Path(video_path).read_bytes() == b"complete-video"
+                return '{"success":true,"analysis":"complete"}'
+
             result = _runtime_tool_middleware(
                 tool_name="video_analyze",
-                args={"video_url": video_path, "question": "Summarize it"},
+                args={"video_url": video_reference, "question": "Summarize it"},
                 session_id=kwargs["session_id"],
                 tool_call_id="video_call",
-                next_call=lambda _args: '{"success":true,"analysis":"complete"}',
+                next_call=analyze_video,
             )
             assert json.loads(result)["analysis"] == "complete"
             return {"final_response": "analyzed"}, {"total_tokens": 1}
@@ -3670,11 +3685,9 @@ async def test_runtime_session_db_resume_projects_generated_output_after_durable
             marker = projected_result
             assert "runtime_generated_media_context" not in json.dumps(history[-1])
             assert "_runtime_image_path" not in projected_result
-            image_path = marker.split("image_url=", 1)[1].split(". Keep", 1)[0]
-            captured["image_path"] = image_path
-            assert Path(image_path).read_bytes() == b"generated-pixels"
+            image_reference = marker.split("image_url=", 1)[1].split(".", 1)[0]
+            assert image_reference == "output_1"
             persisted = json.dumps(self.db.messages)
-            assert image_path not in persisted
             assert "data:image" not in persisted
             assert base64.b64encode(b"generated-pixels").decode() not in persisted
             assert "runtime_generated_media_context" not in persisted
@@ -3689,6 +3702,10 @@ async def test_runtime_session_db_resume_projects_generated_output_after_durable
                 ),
             )
             assert json.loads(analyzed)["analysis"] == "one image"
+            image_path = captured["analyze_args"]["image_url"]
+            captured["image_path"] = image_path
+            assert Path(image_path).read_bytes() == b"generated-pixels"
+            assert image_path not in persisted
             assert captured["analyze_args"]["image_url"] == image_path
             return {"final_response": "one image ready"}, {"total_tokens": 1}
 

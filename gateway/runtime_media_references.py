@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 import threading
@@ -13,10 +16,196 @@ from urllib.parse import urlparse
 from gateway.api_server_shared import MAX_RUNTIME_ATTACHMENT_BYTES
 
 
+_RUNTIME_IMAGE_MIME_TYPES = {
+    "image/gif",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+}
+_RUNTIME_VIDEO_MIME_TYPES = {
+    "video/mp4",
+    "video/quicktime",
+    "video/webm",
+}
+_MAX_RUNTIME_IMAGE_BYTES = 20 << 20
+_MAX_RUNTIME_VIDEO_BYTES = 50 << 20
+_RUNTIME_VIDEO_SUFFIXES = {
+    "video/mp4": ".mp4",
+    "video/quicktime": ".mov",
+    "video/webm": ".webm",
+}
+_RUNTIME_IMAGE_SUFFIXES = {
+    "image/gif": ".gif",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
+
+
 @dataclass
 class PendingMediaReference:
     ready: threading.Event = field(default_factory=threading.Event)
     result: dict[str, Any] | None = None
+
+
+def runtime_attachment_parts(
+    attachments: Any,
+    *,
+    image_dir: str | os.PathLike[str] | None = None,
+    video_dir: str | os.PathLike[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Materialize trusted Runtime attachments without exposing private paths."""
+    if attachments in (None, []):
+        return []
+    if not isinstance(attachments, list) or len(attachments) > 8:
+        raise ValueError("attachments must be an array of at most 8 items")
+    parts: list[dict[str, Any]] = []
+    total_bytes = 0
+    for item in attachments:
+        if not isinstance(item, dict):
+            raise ValueError("attachments must contain only objects")
+        asset_id = str(item.get("asset_id") or "").strip()
+        reference_id = str(item.get("reference_id") or asset_id).strip()
+        role = str(item.get("role") or "").strip()
+        filename = str(item.get("filename") or "").strip()
+        media_type = str(item.get("media_type") or "").strip()
+        mime_type = str(item.get("mime_type") or "").strip().lower()
+        encoded = item.get("data")
+        if (
+            not reference_id
+            or (asset_id and item.get("reference_id") and reference_id != asset_id)
+            or not role
+            or not filename
+            or not isinstance(encoded, str)
+        ):
+            raise ValueError("attachment identity, role, filename, and data are required")
+
+        identity_label = "asset_id" if asset_id else "reference_id"
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError("attachment data must be valid base64") from exc
+        total_bytes += len(data)
+        if total_bytes > MAX_RUNTIME_ATTACHMENT_BYTES:
+            raise ValueError("runtime attachments exceed the 64 MiB total limit")
+        if media_type == "image":
+            if (
+                mime_type not in _RUNTIME_IMAGE_MIME_TYPES
+                or not data
+                or len(data) > _MAX_RUNTIME_IMAGE_BYTES
+            ):
+                raise ValueError("runtime image attachment is invalid or too large")
+            if image_dir is None:
+                raise ValueError("runtime image materialization directory is required")
+            image_path = _materialize_media(
+                image_dir,
+                reference_id,
+                _RUNTIME_IMAGE_SUFFIXES[mime_type],
+                data,
+            )
+            parts.append({
+                "type": "text",
+                "text": (
+                    f"[Attached image: {filename}; role={role}; "
+                    f"{identity_label}={reference_id}. "
+                    "When pixel analysis is required, call image_analyze with "
+                    f"image_url={reference_id}. The Runtime resolves this opaque, "
+                    "run-bound reference to its private materialized file.]"
+                ),
+                "_runtime_reference_id": reference_id,
+                "_runtime_image_path": str(image_path),
+            })
+            parts.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime_type};base64,{encoded}"},
+            })
+            continue
+        if media_type == "video":
+            if (
+                mime_type not in _RUNTIME_VIDEO_MIME_TYPES
+                or not data
+                or len(data) > _MAX_RUNTIME_VIDEO_BYTES
+            ):
+                raise ValueError("runtime video attachment is invalid or too large")
+            if video_dir is None:
+                raise ValueError("runtime video materialization directory is required")
+            video_path = _materialize_media(
+                video_dir,
+                reference_id,
+                _RUNTIME_VIDEO_SUFFIXES[mime_type],
+                data,
+            )
+            parts.append({
+                "type": "text",
+                "text": (
+                    f"[Attached video: {filename}; role={role}; "
+                    f"{identity_label}={reference_id}. "
+                    "Analyze the source video with video_analyze using "
+                    f"video_url={reference_id} and include_transcript=true. "
+                    "The Runtime resolves this opaque, run-bound reference to its "
+                    "private materialized file. The tool performs authoritative "
+                    "server-side frame sampling and reports its temporal coverage.]"
+                ),
+                "_runtime_reference_id": reference_id,
+                "_runtime_video_path": str(video_path),
+            })
+            continue
+        raise ValueError("runtime attachment media_type must be image or video")
+    return parts
+
+
+def _materialize_media(
+    directory: str | os.PathLike[str],
+    reference_id: str,
+    suffix: str,
+    data: bytes,
+) -> Path:
+    target_dir = Path(directory).resolve()
+    target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    target = target_dir / (hashlib.sha256(reference_id.encode("utf-8")).hexdigest()[:24] + suffix)
+    target.write_bytes(data)
+    target.chmod(0o600)
+    return target
+
+
+def runtime_image_paths(parts: list[dict[str, Any]]) -> list[Path]:
+    return _runtime_paths(parts, "_runtime_image_path")
+
+
+def runtime_video_paths(parts: list[dict[str, Any]]) -> list[Path]:
+    return _runtime_paths(parts, "_runtime_video_path")
+
+
+def _runtime_paths(parts: list[dict[str, Any]], path_key: str) -> list[Path]:
+    return [
+        Path(str(part[path_key])).resolve()
+        for part in parts
+        if isinstance(part, dict) and part.get(path_key)
+    ]
+
+
+def runtime_reference_paths(
+    parts: list[dict[str, Any]],
+    path_key: str,
+) -> dict[str, str]:
+    references: dict[str, str] = {}
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        reference_id = str(part.get("_runtime_reference_id") or "").strip()
+        runtime_path = str(part.get(path_key) or "").strip()
+        if reference_id and runtime_path:
+            references[reference_id] = str(Path(runtime_path).resolve())
+    return references
+
+
+def public_runtime_attachment_parts(
+    parts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        {key: value for key, value in part.items() if not key.startswith("_runtime_")}
+        for part in parts
+    ]
 
 
 def rewrite_known_media_references(
