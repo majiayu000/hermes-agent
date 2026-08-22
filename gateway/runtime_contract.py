@@ -29,6 +29,7 @@ RUNTIME_CAPABILITIES = (
     "delegated_tools",
     "interrupt",
     "model_contract_control",
+    "media_reference_resolution",
     "session_db_resume",
     "session_db_rebootstrap/v1",
     "retry_current_turn/v1",

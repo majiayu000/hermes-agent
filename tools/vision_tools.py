@@ -1322,48 +1322,15 @@ async def video_analyze_tool(
         error_msg = f"Error analyzing video: {str(e)}"
         logger.error("%s", error_msg, exc_info=True)
 
-        err_str = str(e).lower()
-        error_code = "video_analysis_failed"
-        if any(hint in err_str for hint in (
-            "402", "insufficient", "payment required", "credits", "billing",
-        )):
-            error_code = "video_analysis_insufficient_credits"
-            analysis = (
-                "Insufficient credits or payment required. Please top up your "
-                f"API provider account and try again. Error: {e}"
-            )
-        elif any(hint in err_str for hint in (
-            "does not support", "not support video",
-            "content_policy", "multimodal",
-            "unrecognized request argument", "video input",
-            "video_url",
-        )):
-            error_code = "video_analysis_model_incompatible"
-            analysis = (
-                f"The model does not support video analysis or the request was "
-                f"rejected. Ensure you're using a video-capable model "
-                f"(e.g. google/gemini-2.5-flash). Error: {e}"
-            )
-        elif any(hint in err_str for hint in (
-            "too large", "payload", "413", "content_too_large",
-            "request_too_large", "exceeds", "size limit",
-        )):
-            error_code = "video_analysis_input_too_large"
-            analysis = (
-                "The video is too large for the API. Try compressing or trimming "
-                f"the video (max ~50 MB). Error: {e}"
-            )
-        else:
-            analysis = (
-                "There was a problem with the request and the video could not "
-                f"be analyzed. Error: {e}"
-            )
+        from tools.video_analysis_errors import classify_video_analysis_error
+
+        error_code, retryable, analysis = classify_video_analysis_error(e)
 
         result = {
             "success": False,
             "error": error_msg,
             "error_code": error_code,
-            "retryable": False,
+            "retryable": retryable,
             "analysis": analysis,
         }
 

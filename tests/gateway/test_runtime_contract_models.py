@@ -123,6 +123,19 @@ def test_event_decoder_rejects_unnegotiated_type_and_bad_payload():
         })
 
 
+def test_event_decoder_accepts_media_reference_control_request():
+    event = decode_runtime_event({
+        "type": "runtime_control_request",
+        "payload": {
+            "request_id": "media_1",
+            "kind": "media_reference.resolve",
+            "reference_id": "asset_brand",
+            "media_type": "image",
+        },
+    })
+    assert event.payload.kind == "media_reference.resolve"
+
+
 def test_failed_tool_result_requires_typed_error():
     with pytest.raises(ValidationError):
         decode_runtime_tool_result({"call_id": "call_fixture", "ok": False})

@@ -246,6 +246,7 @@ async def image_analyze_tool(
 ) -> str:
     """Analyze one to sixteen images together in a single vision-model call."""
     temp_paths: list[Path] = []
+    provider_submission_started = False
     try:
         from tools.interrupt import is_interrupted
 
@@ -294,6 +295,7 @@ async def image_analyze_tool(
             call_kwargs["model"] = model
 
         try:
+            provider_submission_started = True
             response = await async_call_llm(**call_kwargs)
         except Exception as exc:
             if not _is_image_size_error(exc):
@@ -332,10 +334,25 @@ async def image_analyze_tool(
         )
     except Exception as exc:
         logger.error("image_analyze failed: %s", exc, exc_info=True)
+        normalized_error = str(exc).lower()
+        retryable = provider_submission_started and any(hint in normalized_error for hint in (
+            "timeout", "timed out", "connection", "temporarily unavailable",
+            "rate limit", "429", "500", "502", "503", "504", "offline",
+        ))
+        error_code = (
+            "image_analysis_provider_unavailable"
+            if retryable
+            else "image_analysis_provider_failed"
+            if provider_submission_started
+            else "invalid_image_input"
+        )
         return json.dumps(
             {
                 "success": False,
                 "error": f"Error analyzing images: {exc}",
+                "error_code": error_code,
+                "retryable": retryable,
+                "provider_submission_started": provider_submission_started,
                 "analysis": (
                     "The images could not be analyzed. Correct the reported "
                     "input or provider error and retry."

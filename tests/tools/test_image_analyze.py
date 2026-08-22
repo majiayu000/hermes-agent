@@ -309,6 +309,8 @@ class TestImageAnalyzeTool:
 
         assert result["success"] is False
         assert "supported image file" in result["error"]
+        assert result["error_code"] == "invalid_image_input"
+        assert result["provider_submission_started"] is False
         mock_call.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -436,6 +438,9 @@ class TestImageAnalyzeTool:
             )
         assert result["success"] is False
         assert "provider offline" in result["error"]
+        assert result["error_code"] == "image_analysis_provider_unavailable"
+        assert result["retryable"] is True
+        assert result["provider_submission_started"] is True
 
     @pytest.mark.asyncio
     async def test_empty_retry_is_an_explicit_error(self, tmp_path):

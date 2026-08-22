@@ -227,10 +227,22 @@ class TextDeltaPayload(_StrictModel):
     delta: str
 
 
-class RuntimeControlRequestPayload(_StrictModel):
+class RuntimeModelContractControlRequest(_StrictModel):
     request_id: NonEmpty128
     kind: Literal["model_contract.get"]
     model: NonEmpty512
+
+
+class RuntimeMediaReferenceControlRequest(_StrictModel):
+    request_id: NonEmpty128
+    kind: Literal["media_reference.resolve"]
+    reference_id: NonEmpty512
+    media_type: Literal["image", "video"]
+
+
+RuntimeControlRequestPayload: TypeAlias = (
+    RuntimeModelContractControlRequest | RuntimeMediaReferenceControlRequest
+)
 
 
 class ActivityStartedPayload(_StrictModel):

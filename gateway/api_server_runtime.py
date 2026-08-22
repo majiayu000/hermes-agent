@@ -62,6 +62,18 @@ from gateway.runtime_session_history import (
     seed_runtime_session as _seed_runtime_session,
 )
 from gateway.runtime_activity import activity_failure_message as _activity_failure_message
+from gateway.runtime_media_references import (
+    image_analysis_scope_error as _image_analysis_scope_error,
+    image_analysis_sources as _image_analysis_sources,
+    invoke_video_analyze as _invoke_video_analyze,
+    resolve_media_arguments as _resolve_media_arguments,
+    rewrite_known_media_references as _rewrite_runtime_media_references,
+)
+from gateway.runtime_native_media_tools import (
+    native_image_tool_definition as _native_image_tool_definition,
+    native_video_tool_definition as _native_video_tool_definition,
+    project_runtime_media_tool as _project_runtime_media_tool,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1088,37 +1100,6 @@ def _project_runtime_resume_attachments(
     return projected
 
 
-def _native_image_tool_definition() -> dict[str, Any]:
-    # Runtime visual research is Hermes-owned: the Orchestrator supplies
-    # run-scoped media authority, while Hermes owns model/provider execution.
-    from tools import image_analyze as _image_analyze  # noqa: F401
-    from tools.registry import registry
-
-    entry = registry.get_entry("image_analyze")
-    if entry is None:
-        raise RuntimeError("Hermes image_analyze tool is not registered")
-    return {
-        "type": "function",
-        "function": {**entry.schema, "name": entry.name},
-    }
-
-
-def _native_video_tool_definition() -> dict[str, Any]:
-    # Importing the module performs its normal registry registration. Runtime
-    # video input is an explicit per-run grant, so it must not depend on the
-    # process-wide default toolset containing the opt-in video tool.
-    from tools import vision_tools as _vision_tools  # noqa: F401
-    from tools.registry import registry
-
-    entry = registry.get_entry("video_analyze")
-    if entry is None:
-        raise RuntimeError("Hermes video_analyze tool is not registered")
-    return {
-        "type": "function",
-        "function": {**entry.schema, "name": entry.name},
-    }
-
-
 def _tool_schemas(definitions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     schemas: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -1378,6 +1359,15 @@ def _runtime_tool_middleware(**kwargs: Any) -> Any:
             ("image_url", "image_paths"),
             session.allowed_image_references,
         )
+        args, reference_error = _resolve_media_arguments(
+            session,
+            args,
+            ("image_url", "image_paths"),
+            "image",
+            str(kwargs.get("tool_call_id") or ""),
+        )
+        if reference_error is not None:
+            return reference_error
         for source in _image_analysis_sources(args):
             parsed = urlparse(source)
             if parsed.scheme.lower() in {"http", "https"}:
@@ -1402,6 +1392,15 @@ def _runtime_tool_middleware(**kwargs: Any) -> Any:
             ("video_url",),
             session.allowed_video_references,
         )
+        args, reference_error = _resolve_media_arguments(
+            session,
+            args,
+            ("video_url",),
+            "video",
+            str(kwargs.get("tool_call_id") or ""),
+        )
+        if reference_error is not None:
+            return reference_error
         return session._invoke_video_analyze(args, next_call)
     if tool_name in _RUNTIME_NATIVE_TOOLS:
         return next_call(args) if callable(next_call) else args
@@ -1425,49 +1424,6 @@ def _runtime_tool_middleware(**kwargs: Any) -> Any:
             "retryable": False,
         },
     }, ensure_ascii=False, separators=(",", ":"))
-
-
-def _rewrite_runtime_media_references(
-    args: dict[str, Any],
-    field_names: tuple[str, ...],
-    references: dict[str, str],
-) -> dict[str, Any]:
-    rewritten = dict(args)
-    for field_name in field_names:
-        value = rewritten.get(field_name)
-        if isinstance(value, str):
-            rewritten[field_name] = references.get(value.strip(), value)
-        elif isinstance(value, list):
-            rewritten[field_name] = [
-                references.get(item.strip(), item) if isinstance(item, str) else item
-                for item in value
-            ]
-    return rewritten
-
-
-def _image_analysis_sources(args: dict[str, Any]) -> list[str]:
-    sources: list[str] = []
-    for field_name in ("image_url", "image_paths"):
-        value = args.get(field_name)
-        if isinstance(value, str):
-            sources.append(value.strip())
-        elif isinstance(value, list):
-            sources.extend(
-                item.strip()
-                for item in value
-                if isinstance(item, str)
-            )
-    return sources
-
-
-def _image_analysis_scope_error() -> str:
-    return json.dumps({
-        "success": False,
-        "error": (
-            "image_analyze may only read HTTP(S) images or local image "
-            "attachments owned by this run."
-        ),
-    })
 
 
 def _ensure_runtime_middleware() -> None:
@@ -1509,6 +1465,7 @@ class RuntimeBridgeSession:
         allowed_video_paths: set[str] | None = None,
         allowed_image_references: dict[str, str] | None = None,
         allowed_video_references: dict[str, str] | None = None,
+        media_temp_dir: str = "",
     ) -> None:
         self.run_id = run_id
         self.agent_session_id = agent_session_id
@@ -1552,6 +1509,10 @@ class RuntimeBridgeSession:
             if reference_id
             and (resolved_path := str(Path(path).resolve())) in self.allowed_video_paths
         }
+        self.unbounded_tool_wait_seconds = _UNBOUNDED_TOOL_WAIT_CAP_SECONDS
+        self.materialize_media_reference = lambda attachment: _runtime_attachment_parts(
+            [attachment], image_dir=media_temp_dir, video_dir=media_temp_dir
+        )
         self.deadline_seconds = max(0.001, deadline_ms / 1000) if deadline_ms > 0 else None
         self.local_activities: dict[str, str] = {}
         self.pending: dict[str, _PendingTool] = {}
@@ -1626,69 +1587,7 @@ class RuntimeBridgeSession:
         ))
 
     def _invoke_video_analyze(self, args: dict[str, Any], next_call: Any) -> Any:
-        """Execute at most one terminally failing video analysis per Run."""
-        with self.video_analyze_lock:
-            with self.lock:
-                prior_code = self.native_non_retryable_failures.get("video_analyze", "")
-            if prior_code:
-                message = (
-                    "Blocked video_analyze: an earlier call in this Run failed with "
-                    f"non-retryable error {prior_code}."
-                )
-                self._halt_tool_loop(
-                    "video_analyze",
-                    args,
-                    "repeated_non_retryable_tool_call",
-                    message,
-                    2,
-                )
-                return json.dumps({
-                    "error": {
-                        "code": "repeated_non_retryable_tool_call",
-                        "message": message,
-                        "retryable": False,
-                    },
-                }, ensure_ascii=False, separators=(",", ":"))
-
-            requested_path = str(args.get("video_url") or "").strip()
-            try:
-                resolved_path = str(Path(requested_path).resolve(strict=True))
-            except (OSError, RuntimeError):
-                resolved_path = ""
-            if resolved_path not in self.allowed_video_paths:
-                result: Any = json.dumps({
-                    "success": False,
-                    "error": (
-                        "video_analyze may only read video attachments owned by this run."
-                    ),
-                    "error_code": "video_analysis_scope_denied",
-                    "retryable": False,
-                })
-            else:
-                result = next_call(args) if callable(next_call) else args
-
-            code = self._native_non_retryable_failure_code(result)
-            if code:
-                with self.lock:
-                    self.native_non_retryable_failures["video_analyze"] = code
-            return result
-
-    @staticmethod
-    def _native_non_retryable_failure_code(result: Any) -> str:
-        payload = result
-        if isinstance(result, str):
-            try:
-                payload = json.loads(result)
-            except (TypeError, ValueError):
-                return ""
-        if not isinstance(payload, dict):
-            return ""
-        error = payload.get("error")
-        if isinstance(error, dict) and error.get("retryable") is False:
-            return str(error.get("code") or "native_tool_failed")
-        if payload.get("success") is False and payload.get("retryable") is False:
-            return str(payload.get("error_code") or "native_tool_failed")
-        return ""
+        return _invoke_video_analyze(self, args, next_call)
 
     def _ensure_model_parameter_contracts(
         self,
@@ -2216,16 +2115,7 @@ class APIServerRuntimeMixin:
             schemas = _tool_schemas(definitions)
             tool_exposure = build_runtime_tool_exposure(definitions, schemas)
             attachments = body.get("attachments")
-            has_image_attachment = any(
-                isinstance(item, dict) and item.get("media_type") == "image"
-                for item in (attachments if isinstance(attachments, list) else [])
-            )
-            has_video_attachment = any(
-                isinstance(item, dict) and item.get("media_type") == "video"
-                for item in (attachments if isinstance(attachments, list) else [])
-            )
-            if has_image_attachment or has_video_attachment:
-                media_temp_dir = tempfile.TemporaryDirectory(prefix="hermes-runtime-media-")
+            media_temp_dir = tempfile.TemporaryDirectory(prefix="hermes-runtime-media-")
             attachment_parts = _runtime_attachment_parts(
                 attachments,
                 image_dir=media_temp_dir.name if media_temp_dir else None,
@@ -2363,6 +2253,7 @@ class APIServerRuntimeMixin:
             allowed_video_paths={str(path) for path in runtime_video_paths},
             allowed_image_references=runtime_image_references,
             allowed_video_references=runtime_video_references,
+            media_temp_dir=media_temp_dir.name,
         )
         _ensure_runtime_middleware()
         _ensure_session_sweeper()
@@ -2390,11 +2281,10 @@ class APIServerRuntimeMixin:
                 "web_search",
                 "web_extract",
                 "image_analyze",
+                "video_analyze",
             }
-            if runtime_video_paths:
-                native_runtime_tools.add("video_analyze")
             native = [
-                tool
+                _project_runtime_media_tool(tool)
                 for tool in (agent.tools or [])
                 if tool.get("function", {}).get("name") in native_runtime_tools
             ]
@@ -2403,7 +2293,7 @@ class APIServerRuntimeMixin:
                 for tool in native
             ):
                 native.append(_native_image_tool_definition())
-            if runtime_video_paths and not any(
+            if not any(
                 tool.get("function", {}).get("name") == "video_analyze"
                 for tool in native
             ):

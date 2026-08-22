@@ -286,10 +286,11 @@
   "x-ultra-contract": {
     "name": "ultra.runtime.run-request",
     "major": 1,
-    "minor": 2,
+    "minor": 3,
     "features": [
       "invoked_skills.v1",
       "llm_egress.v1",
+      "media_reference_resolution.v1",
       "session_db_rebootstrap.v1",
       "system_prompt_profiles.v1",
       "tool_result_replay.v1",

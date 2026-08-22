@@ -1,5 +1,11 @@
 # Runtime contract changelog
 
+## 1.3.0 — 2026-08-22
+
+- Add private on-demand `media_reference.resolve` control requests for run-bound
+  `asset_id` and `output_id` references used by Runtime-native media analysis.
+- Keep resolved bytes and paths ephemeral and outside durable product events.
+
 ## 1.2.0 — 2026-08-19
 
 - Add Hermes-owned named system-prompt profiles.

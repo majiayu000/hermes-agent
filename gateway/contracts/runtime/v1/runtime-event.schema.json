@@ -92,13 +92,32 @@
         "properties": {
           "payload": {
             "type": "object",
-            "additionalProperties": false,
-            "required": ["request_id", "kind", "model"],
-            "properties": {
-              "request_id": {"type": "string", "minLength": 1, "maxLength": 128},
-              "kind": {"const": "model_contract.get"},
-              "model": {"type": "string", "minLength": 1, "maxLength": 512}
-            }
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "required": ["request_id", "kind", "model"],
+                "properties": {
+                  "request_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                  "kind": {"const": "model_contract.get"},
+                  "model": {"type": "string", "minLength": 1, "maxLength": 512}
+                }
+              },
+              {
+                "additionalProperties": false,
+                "required": ["request_id", "kind", "reference_id", "media_type"],
+                "properties": {
+                  "request_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                  "kind": {"const": "media_reference.resolve"},
+                  "reference_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512,
+                    "pattern": "^(asset|output)_[A-Za-z0-9][A-Za-z0-9._-]*$"
+                  },
+                  "media_type": {"enum": ["image", "video"]}
+                }
+              }
+            ]
           }
         }
       }
@@ -203,6 +222,6 @@
   "x-ultra-contract": {
     "name": "ultra.runtime.runtime-event",
     "major": 1,
-    "minor": 2
+    "minor": 3
   }
 }

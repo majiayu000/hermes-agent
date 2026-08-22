@@ -38,6 +38,6 @@
   "x-ultra-contract": {
     "name": "ultra.runtime.error",
     "major": 1,
-    "minor": 2
+    "minor": 3
   }
 }

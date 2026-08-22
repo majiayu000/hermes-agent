@@ -270,6 +270,7 @@ class _RuntimeAdapter(_TestRuntimeAdapter):
             "image_analyze",
             "skill_view",
             "tool_search",
+            "video_analyze",
             "web_extract",
             "web_search",
         }
@@ -583,6 +584,16 @@ def test_runtime_video_tool_is_scoped_to_materialized_attachment(tmp_path):
         assert accepted == '{"success":true}'
         assert seen == [{"video_url": str(allowed), "question": "Summarize it"}]
 
+        remote = _runtime_tool_middleware(
+            tool_name="video_analyze",
+            args={"video_url": "https://example.com/reference.mp4", "question": "Summarize it"},
+            session_id="agent_video",
+            tool_call_id="video_remote",
+            next_call=lambda args: seen.append(args) or '{"success":true}',
+        )
+        assert remote == '{"success":true}'
+        assert seen[-1]["video_url"] == "https://example.com/reference.mp4"
+
         denied = _runtime_tool_middleware(
             tool_name="video_analyze",
             args={"video_url": os.devnull, "question": "Read another file"},
@@ -590,12 +601,10 @@ def test_runtime_video_tool_is_scoped_to_materialized_attachment(tmp_path):
             tool_call_id="video_denied",
             next_call=lambda _args: pytest.fail("untrusted local path reached video tool"),
         )
-        assert json.loads(denied) == {
-            "success": False,
-            "error": "video_analyze may only read video attachments owned by this run.",
-            "error_code": "video_analysis_scope_denied",
-            "retryable": False,
-        }
+        denied_payload = json.loads(denied)
+        assert denied_payload["success"] is False
+        assert denied_payload["error"]["code"] == "video_analysis_scope_denied"
+        assert denied_payload["error"]["provider_submission_started"] is False
     finally:
         runtime_module._SESSIONS.pop("agent_video", None)
         session.loop.close()
@@ -640,22 +649,31 @@ def test_runtime_video_tool_blocks_changed_retry_after_terminal_failure(tmp_path
         )
         assert json.loads(first)["error_code"] == "video_analysis_model_incompatible"
 
-        second = _runtime_tool_middleware(
+        changed = _runtime_tool_middleware(
             tool_name="video_analyze",
             args={"video_url": str(allowed), "question": "Try a different prompt"},
             session_id="agent_video_terminal",
             tool_call_id="video_second",
             next_call=fail_once,
         )
-        assert json.loads(second)["error"] == {
+        assert json.loads(changed)["error_code"] == "video_analysis_model_incompatible"
+
+        unchanged = _runtime_tool_middleware(
+            tool_name="video_analyze",
+            args={"video_url": str(allowed), "question": "Try a different prompt"},
+            session_id="agent_video_terminal",
+            tool_call_id="video_third",
+            next_call=fail_once,
+        )
+        assert json.loads(unchanged)["error"] == {
             "code": "repeated_non_retryable_tool_call",
             "message": (
-                "Blocked video_analyze: an earlier call in this Run failed with "
-                "non-retryable error video_analysis_model_incompatible."
+                "Blocked unchanged video_analyze retry after non-retryable error "
+                "video_analysis_model_incompatible."
             ),
             "retryable": False,
         }
-        assert len(calls) == 1
+        assert len(calls) == 2
         assert len(halt_decisions) == 1
         assert halt_decisions[0].code == "repeated_non_retryable_tool_call"
         assert halt_decisions[0].should_halt is True
@@ -704,13 +722,10 @@ def test_runtime_image_tool_allows_remote_and_scopes_local_sources(tmp_path):
             tool_call_id="image_denied",
             next_call=lambda _args: pytest.fail("untrusted local path reached image tool"),
         )
-        assert json.loads(denied) == {
-            "success": False,
-            "error": (
-                "image_analyze may only read HTTP(S) images or local image "
-                "attachments owned by this run."
-            ),
-        }
+        denied_payload = json.loads(denied)
+        assert denied_payload["success"] is False
+        assert denied_payload["error"]["code"] == "image_analysis_scope_denied"
+        assert denied_payload["error"]["provider_submission_started"] is False
     finally:
         runtime_module._SESSIONS.pop("agent_image", None)
         session.loop.close()
@@ -803,13 +818,10 @@ def test_runtime_image_tool_scopes_normalized_singular_path_alias(tmp_path):
                 "an unowned singular path alias reached the image tool"
             ),
         )
-        assert json.loads(denied) == {
-            "success": False,
-            "error": (
-                "image_analyze may only read HTTP(S) images or local image "
-                "attachments owned by this run."
-            ),
-        }
+        denied_payload = json.loads(denied)
+        assert denied_payload["success"] is False
+        assert denied_payload["error"]["code"] == "image_analysis_scope_denied"
+        assert denied_payload["error"]["provider_submission_started"] is False
     finally:
         runtime_module._SESSIONS.pop("agent_image_singular_alias", None)
         session.loop.close()
@@ -846,13 +858,10 @@ def test_runtime_image_tool_rejects_json_encoded_array_with_unowned_path(tmp_pat
                 "an unowned path reached the image tool"
             ),
         )
-        assert json.loads(denied) == {
-            "success": False,
-            "error": (
-                "image_analyze may only read HTTP(S) images or local image "
-                "attachments owned by this run."
-            ),
-        }
+        denied_payload = json.loads(denied)
+        assert denied_payload["success"] is False
+        assert denied_payload["error"]["code"] == "image_analysis_scope_denied"
+        assert denied_payload["error"]["provider_submission_started"] is False
     finally:
         runtime_module._SESSIONS.pop("agent_image_json_array_denied", None)
         session.loop.close()
@@ -969,7 +978,7 @@ async def test_runtime_bridge_delivers_image_attachment_as_multimodal_user_conte
                 agent._runtime_tool_result_image_mode
             )
             captured["user_message"] = kwargs["user_message"]
-            assert agent.valid_tool_names == {"image_analyze"}
+            assert agent.valid_tool_names == {"image_analyze", "video_analyze"}
             marker = next(
                 part["text"]
                 for part in kwargs["user_message"]
