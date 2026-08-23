@@ -222,6 +222,6 @@
   "x-ultra-contract": {
     "name": "ultra.runtime.runtime-event",
     "major": 1,
-    "minor": 3
+    "minor": 4
   }
 }

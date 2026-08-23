@@ -1,7 +1,7 @@
 contract_name: ultra.runtime
 contract_major: 1
-min_minor: 3
-max_minor: 3
+min_minor: 4
+max_minor: 4
 runtime_protocol_version: "2"
 schemas:
   - error.schema.json
@@ -23,6 +23,7 @@ features:
   - session_db_rebootstrap.v1
   - system_prompt_profiles.v1
   - tool_result_replay.v1
+  - typed_run_control.v1
   - vision_llm_egress.v1
 runtime_frame_types:
   - run_started

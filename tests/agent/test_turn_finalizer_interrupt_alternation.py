@@ -206,7 +206,7 @@ def test_runtime_deferred_park_does_not_append_generic_interrupt_tail():
         },
     ]
 
-    _finalize(agent, messages, interrupted=True, final_response=None)
+    result = _finalize(agent, messages, interrupted=True, final_response=None)
 
     assert messages[-1]["role"] == "tool"
     assert messages[-1]["tool_call_id"] == "call_sibling"
@@ -215,6 +215,18 @@ def test_runtime_deferred_park_does_not_append_generic_interrupt_tail():
         for message in messages
     )
     assert agent.persisted_messages == messages
+    assert result["turn_exit_reason"] == "runtime_suspended"
+
+
+def test_runtime_abort_is_not_recorded_as_user_interrupt():
+    agent = _StubAgent()
+    agent._runtime_termination_kind = "abort"
+    messages = _interrupted_tool_tail()
+
+    result = _finalize(agent, messages, interrupted=True, final_response=None)
+
+    assert result["turn_exit_reason"] == "runtime_attempt_aborted"
+    assert messages[-1]["role"] == "tool"
 
 
 def test_non_interrupted_tool_tail_is_left_untouched():

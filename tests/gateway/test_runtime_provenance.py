@@ -410,10 +410,13 @@ async def test_healthz_exposes_provenance_without_api_key():
     assert body["runtime_protocol_version"] == RUNTIME_PROTOCOL_VERSION
     assert "error" in body["runtime_frame_types"]
     assert {
+        "abort_attempt",
+        "cancel_run",
         "delegated_tools",
-        "interrupt",
+        "suspend_attempt",
         "system_context.replace",
     } <= set(body["runtime_capabilities"])
+    assert "interrupt" not in body["runtime_capabilities"]
     assert body["status"] == "ok"
     assert secret not in json.dumps(body)
 

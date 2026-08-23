@@ -174,7 +174,13 @@ class RuntimeCapabilityVerifier:
                 raise RuntimeCapabilityError("runtime capability path is invalid")
             remainder = path[len(prefix):]
             parts = remainder.split("/", 1)
-            if len(parts) != 2 or parts[1] not in {"tool-results", "control-results", "interrupt"}:
+            if len(parts) != 2 or parts[1] not in {
+                "tool-results",
+                "control-results",
+                "suspend",
+                "cancel",
+                "abort",
+            }:
                 raise RuntimeCapabilityError("runtime capability path is invalid")
             run_id, suffix = parts
             action = f"runtime.run.{suffix}"

@@ -286,7 +286,7 @@
   "x-ultra-contract": {
     "name": "ultra.runtime.run-request",
     "major": 1,
-    "minor": 3,
+    "minor": 4,
     "features": [
       "invoked_skills.v1",
       "llm_egress.v1",
@@ -294,6 +294,7 @@
       "session_db_rebootstrap.v1",
       "system_prompt_profiles.v1",
       "tool_result_replay.v1",
+      "typed_run_control.v1",
       "vision_llm_egress.v1"
     ]
   }

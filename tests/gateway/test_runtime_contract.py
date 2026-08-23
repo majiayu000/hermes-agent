@@ -17,11 +17,14 @@ def test_runtime_health_contract_is_explicit_and_versioned():
     assert contract["runtime_frame_types"] == list(RUNTIME_DRIVER_FRAME_TYPES)
     assert "checkpoint" not in contract["runtime_frame_types"]
     assert {
+        "abort_attempt",
+        "cancel_run",
         "delegated_tools",
-        "interrupt",
+        "suspend_attempt",
         "system_context.replace",
         "llm_egress",
     } <= set(contract["runtime_capabilities"])
+    assert "interrupt" not in contract["runtime_capabilities"]
 
 
 def test_runtime_manifest_contract_is_negotiable_and_contains_real_limits():
@@ -41,12 +44,14 @@ def test_runtime_manifest_contract_is_negotiable_and_contains_real_limits():
             "schema_digests": [RUNTIME_CONTRACT_SCHEMA_DIGEST],
         },
         "intents": ["bootstrap", "new_turn", "resume", "retry", "rebootstrap"],
-            "features": [
-                "invoked_skills.v1",
-                "llm_egress.v1",
-                "session_db_rebootstrap.v1",
-                "system_prompt_profiles.v1",
-                "tool_result_replay.v1",
+        "features": [
+            "invoked_skills.v1",
+            "llm_egress.v1",
+            "media_reference_resolution.v1",
+            "session_db_rebootstrap.v1",
+            "system_prompt_profiles.v1",
+            "tool_result_replay.v1",
+            "typed_run_control.v1",
             "vision_llm_egress.v1",
         ],
         "limits": {

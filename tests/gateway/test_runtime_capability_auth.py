@@ -173,3 +173,28 @@ def test_runtime_service_identity_is_independent_from_operation_capability():
     }
     with pytest.raises(RuntimeCapabilityError, match="service credential"):
         verifier.verify_service_identity(Request())
+
+
+@pytest.mark.parametrize(
+    ("suffix", "expected_action"),
+    [
+        ("tool-results", "runtime.run.tool-results"),
+        ("control-results", "runtime.run.control-results"),
+        ("suspend", "runtime.run.suspend"),
+        ("cancel", "runtime.run.cancel"),
+        ("abort", "runtime.run.abort"),
+    ],
+)
+def test_runtime_capability_scopes_each_supported_run_operation(suffix, expected_action):
+    assert RuntimeCapabilityVerifier._operation_scope(
+        f"/v1/runtime/runs/run_auth_test/{suffix}",
+        b"{}",
+    ) == ("run_auth_test", expected_action)
+
+
+def test_runtime_capability_rejects_retired_generic_interrupt_operation():
+    with pytest.raises(RuntimeCapabilityError, match="path is invalid"):
+        RuntimeCapabilityVerifier._operation_scope(
+            "/v1/runtime/runs/run_auth_test/interrupt",
+            b"{}",
+        )

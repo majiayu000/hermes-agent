@@ -1,5 +1,11 @@
 # Runtime contract changelog
 
+## 1.4.0 — 2026-08-23
+
+- Replace the untyped Runtime interrupt control with negotiated suspend,
+  cancel, and abort controls. Suspend preserves the Hermes continuation and
+  never invokes the Agent interrupt API.
+
 ## 1.3.0 — 2026-08-22
 
 - Add private on-demand `media_reference.resolve` control requests for run-bound

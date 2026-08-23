@@ -50,7 +50,20 @@ def finalize_turn(
     """
     from agent.conversation_loop import logger
 
-    if final_response is None and (
+    runtime_suspended = bool(getattr(agent, "_runtime_deferred_tool_call_id", None))
+    termination_kind = str(getattr(agent, "_runtime_termination_kind", ""))
+    if (
+        not termination_kind
+        and getattr(agent, "_interrupt_message", "") == "orchestrator stream disconnected"
+    ):
+        termination_kind = "abort"
+    if runtime_suspended:
+        _turn_exit_reason = "runtime_suspended"
+    elif termination_kind == "abort":
+        _turn_exit_reason = "runtime_attempt_aborted"
+    elif termination_kind == "cancel":
+        _turn_exit_reason = "run_canceled"
+    elif final_response is None and (
         api_call_count >= agent.max_iterations
         or agent.iteration_budget.remaining <= 0
     ):
@@ -183,7 +196,7 @@ def finalize_turn(
         # here instead. On an interrupt ``final_response`` is typically
         # empty, so fall back to an explicit placeholder rather than
         # persisting an empty-content assistant turn.
-        if interrupted and not getattr(agent, "_runtime_deferred_tool_call_id", None):
+        if interrupted and not runtime_suspended and termination_kind != "abort":
             from agent.message_sanitization import close_interrupted_tool_sequence
             close_interrupted_tool_sequence(messages, final_response)
 

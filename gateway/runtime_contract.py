@@ -26,12 +26,14 @@ RUNTIME_DRIVER_FRAME_TYPES = (
     "error",
 )
 RUNTIME_CAPABILITIES = (
+    "abort_attempt",
+    "cancel_run",
     "delegated_tools",
-    "interrupt",
     "model_contract_control",
     "media_reference_resolution",
     "session_db_resume",
     "session_db_rebootstrap/v1",
+    "suspend_attempt",
     "retry_current_turn/v1",
     "system_context.profile",
     "system_context.replace",
