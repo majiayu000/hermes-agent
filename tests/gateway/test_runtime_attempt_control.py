@@ -6,6 +6,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from agent.iteration_budget import IterationBudget
 from agent.tool_dispatch_helpers import DeferredToolResult
 from gateway.api_server_lifecycle import APIServerLifecycleMixin
 from gateway.api_server_runtime import RuntimeBridgeSession, _SESSIONS, _SESSIONS_LOCK
@@ -14,10 +15,6 @@ from gateway.runtime_attempt_control import (
     suspend_attempt,
     terminate_attempt,
 )
-
-
-class _Budget:
-    remaining = 12
 
 
 class _Pending:
@@ -32,7 +29,7 @@ class _Session:
         self.pending_controls = {"control_1": _Pending()}
         self.interrupted = threading.Event()
         self.interrupt_reason = ""
-        self.agent = SimpleNamespace(iteration_budget=_Budget())
+        self.agent = SimpleNamespace(iteration_budget=IterationBudget(12))
         self.agent_ref = [self.agent]
         self.events = []
         self.interrupt_calls = []
@@ -128,7 +125,7 @@ async def test_suspend_returns_deferred_result_through_real_runtime_bridge():
     )
     interrupts = []
     session.agent_ref[0] = SimpleNamespace(
-        iteration_budget=_Budget(),
+        iteration_budget=IterationBudget(12),
         interrupt=lambda reason: interrupts.append(reason),
     )
     call = asyncio.create_task(asyncio.to_thread(

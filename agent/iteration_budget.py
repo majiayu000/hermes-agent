@@ -48,6 +48,11 @@ class IterationBudget:
             if self._used > 0:
                 self._used -= 1
 
+    def exhaust(self) -> None:
+        """Prevent another iteration from starting in the current turn."""
+        with self._lock:
+            self._used = self.max_total
+
     @property
     def used(self) -> int:
         with self._lock:

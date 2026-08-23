@@ -104,3 +104,17 @@ def test_iteration_budget_remaining():
     assert budget.remaining == 2
     budget.refund()
     assert budget.remaining == 3
+
+
+def test_iteration_budget_exhaust_prevents_further_consumption():
+    """exhaust() must atomically close the current turn's budget."""
+    from run_agent import IterationBudget
+
+    budget = IterationBudget(max_total=5)
+    assert budget.consume() is True
+
+    budget.exhaust()
+
+    assert budget.used == 5
+    assert budget.remaining == 0
+    assert budget.consume() is False

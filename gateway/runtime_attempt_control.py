@@ -47,7 +47,7 @@ def suspend_attempt(session: Any, reason: str) -> None:
     agent = session.agent_ref[0]
     if agent is not None:
         agent._runtime_suspended = True
-        agent.iteration_budget.remaining = 0
+        agent.iteration_budget.exhaust()
 
     _wake_pending(session)
 
