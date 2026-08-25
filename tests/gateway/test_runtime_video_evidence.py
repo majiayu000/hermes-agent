@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import threading
 from types import SimpleNamespace
 
 import pytest
 
 from gateway.runtime_media_references import (
+    invoke_video_analyze,
     prepare_video_evidence,
     validate_video_evidence,
 )
@@ -88,3 +90,43 @@ def test_video_evidence_control_uses_opaque_reference_and_returns_projection():
     assert error is None
     assert result is evidence
     assert session.pending_controls == {}
+
+
+def test_video_analyze_returns_completed_result_to_agent(monkeypatch):
+    evidence = _evidence("output_video")
+    session = SimpleNamespace(
+        video_analyze_lock=threading.Lock(),
+        lock=threading.RLock(),
+        native_non_retryable_failures={},
+        _tool_signature_key=lambda name, args: f"{name}:{args['video_url']}",
+        _halt_tool_loop=lambda *_args: None,
+    )
+
+    monkeypatch.setattr(
+        "gateway.runtime_media_references.prepare_video_evidence",
+        lambda *_args, **_kwargs: (evidence, None),
+    )
+
+    async def analyze(_evidence, _prompt, _model, _include_transcript):
+        return json.dumps({"success": True, "analysis": "bounded evidence"})
+
+    monkeypatch.setattr(
+        "tools.runtime_video_evidence.analyze_runtime_video_evidence",
+        analyze,
+    )
+
+    result = invoke_video_analyze(
+        session,
+        {
+            "video_url": "output_video",
+            "question": "Inspect it",
+            "_runtime_parent_call_id": "call_video",
+        },
+        None,
+    )
+
+    assert isinstance(result, str)
+    assert json.loads(result) == {
+        "success": True,
+        "analysis": "bounded evidence",
+    }

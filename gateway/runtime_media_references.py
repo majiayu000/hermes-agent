@@ -348,7 +348,7 @@ def media_reference_error(code: str, message: str, retryable: bool) -> str:
     }, ensure_ascii=False, separators=(",", ":"))
 
 
-def invoke_video_analyze(session: Any, args: dict[str, Any], next_call: Any) -> Any:
+def invoke_video_analyze(session: Any, args: dict[str, Any], next_call: Any) -> str:
     """Stop only an unchanged terminal video-analysis retry."""
     with session.video_analyze_lock:
         signature_args = dict(args)
@@ -388,6 +388,7 @@ def invoke_video_analyze(session: Any, args: dict[str, Any], next_call: Any) -> 
             if error is not None:
                 result = error
             else:
+                from model_tools import _run_async
                 from tools.runtime_video_evidence import analyze_runtime_video_evidence
 
                 question = str(args.get("question") or "")
@@ -402,11 +403,13 @@ def invoke_video_analyze(session: Any, args: dict[str, Any], next_call: Any) -> 
                     or os.getenv("AUXILIARY_VISION_MODEL", "").strip()
                     or None
                 )
-                result = analyze_runtime_video_evidence(
-                    evidence,
-                    prompt,
-                    model,
-                    args.get("include_transcript") is True,
+                result = _run_async(
+                    analyze_runtime_video_evidence(
+                        evidence,
+                        prompt,
+                        model,
+                        args.get("include_transcript") is True,
+                    )
                 )
         code = _native_non_retryable_failure_code(result)
         if code:
