@@ -162,9 +162,12 @@ def run_agent_sync(
             conversation_kwargs["runtime_message_id"] = runtime_message_id
         result = agent.run_conversation(**conversation_kwargs)
         usage = {
-            "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
-            "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
+            "input_tokens": getattr(agent, "session_input_tokens", 0) or 0,
+            "output_tokens": getattr(agent, "session_output_tokens", 0) or 0,
+            "cache_read_tokens": getattr(agent, "session_cache_read_tokens", 0) or 0,
+            "cache_write_tokens": getattr(agent, "session_cache_write_tokens", 0) or 0,
             "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
+            "api_calls": getattr(agent, "session_api_calls", 0) or 0,
         }
         effective_session_id = getattr(agent, "session_id", session_id)
         if isinstance(result, dict) and isinstance(effective_session_id, str) and effective_session_id:

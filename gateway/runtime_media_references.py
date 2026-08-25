@@ -22,18 +22,8 @@ _RUNTIME_IMAGE_MIME_TYPES = {
     "image/png",
     "image/webp",
 }
-_RUNTIME_VIDEO_MIME_TYPES = {
-    "video/mp4",
-    "video/quicktime",
-    "video/webm",
-}
 _MAX_RUNTIME_IMAGE_BYTES = 20 << 20
-_MAX_RUNTIME_VIDEO_BYTES = 50 << 20
-_RUNTIME_VIDEO_SUFFIXES = {
-    "video/mp4": ".mp4",
-    "video/quicktime": ".mov",
-    "video/webm": ".webm",
-}
+_MAX_VIDEO_EVIDENCE_BYTES = 6 << 20
 _RUNTIME_IMAGE_SUFFIXES = {
     "image/gif": ".gif",
     "image/jpeg": ".jpg",
@@ -52,9 +42,8 @@ def runtime_attachment_parts(
     attachments: Any,
     *,
     image_dir: str | os.PathLike[str] | None = None,
-    video_dir: str | os.PathLike[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Materialize trusted Runtime attachments without exposing private paths."""
+    """Materialize one bounded image projection without exposing private paths."""
     if attachments in (None, []):
         return []
     if not isinstance(attachments, list) or len(attachments) > 8:
@@ -120,37 +109,7 @@ def runtime_attachment_parts(
                 "image_url": {"url": f"data:{mime_type};base64,{encoded}"},
             })
             continue
-        if media_type == "video":
-            if (
-                mime_type not in _RUNTIME_VIDEO_MIME_TYPES
-                or not data
-                or len(data) > _MAX_RUNTIME_VIDEO_BYTES
-            ):
-                raise ValueError("runtime video attachment is invalid or too large")
-            if video_dir is None:
-                raise ValueError("runtime video materialization directory is required")
-            video_path = _materialize_media(
-                video_dir,
-                reference_id,
-                _RUNTIME_VIDEO_SUFFIXES[mime_type],
-                data,
-            )
-            parts.append({
-                "type": "text",
-                "text": (
-                    f"[Attached video: {filename}; role={role}; "
-                    f"{identity_label}={reference_id}. "
-                    "Analyze the source video with video_analyze using "
-                    f"video_url={reference_id} and include_transcript=true. "
-                    "The Runtime resolves this opaque, run-bound reference to its "
-                    "private materialized file. The tool performs authoritative "
-                    "server-side frame sampling and reports its temporal coverage.]"
-                ),
-                "_runtime_reference_id": reference_id,
-                "_runtime_video_path": str(video_path),
-            })
-            continue
-        raise ValueError("runtime attachment media_type must be image or video")
+        raise ValueError("runtime media_reference.resolve only accepts images")
     return parts
 
 
@@ -170,10 +129,6 @@ def _materialize_media(
 
 def runtime_image_paths(parts: list[dict[str, Any]]) -> list[Path]:
     return _runtime_paths(parts, "_runtime_image_path")
-
-
-def runtime_video_paths(parts: list[dict[str, Any]]) -> list[Path]:
-    return _runtime_paths(parts, "_runtime_video_path")
 
 
 def _runtime_paths(parts: list[dict[str, Any]], path_key: str) -> list[Path]:
@@ -293,11 +248,13 @@ def _resolve_media_reference(
     media_type: str,
     parent_call_id: str,
 ) -> tuple[str, str | None]:
-    references = (
-        session.allowed_image_references
-        if media_type == "image"
-        else session.allowed_video_references
-    )
+    if media_type != "image":
+        return "", media_reference_error(
+            "invalid_media_reference",
+            "media_reference.resolve only supports images",
+            False,
+        )
+    references = session.allowed_image_references
     existing = references.get(reference_id)
     if existing:
         return existing, None
@@ -346,7 +303,7 @@ def _resolve_media_reference(
             "resolved media did not satisfy the Runtime attachment contract",
             False,
         )
-    path_key = "_runtime_image_path" if media_type == "image" else "_runtime_video_path"
+    path_key = "_runtime_image_path"
     paths = [str(part[path_key]) for part in parts if isinstance(part, dict) and part.get(path_key)]
     if len(paths) != 1:
         return "", media_reference_error(
@@ -356,7 +313,7 @@ def _resolve_media_reference(
         )
     path = str(Path(paths[0]).resolve())
     with session.lock:
-        all_paths = session.allowed_image_paths | session.allowed_video_paths
+        all_paths = session.allowed_image_paths
         total_bytes = sum(
             candidate.stat().st_size
             for raw_path in all_paths
@@ -372,12 +329,8 @@ def _resolve_media_reference(
                 "resolved media exceeds the Runtime attachment budget",
                 False,
             )
-        if media_type == "image":
-            session.allowed_image_paths.add(path)
-            session.allowed_image_references[reference_id] = path
-        else:
-            session.allowed_video_paths.add(path)
-            session.allowed_video_references[reference_id] = path
+        session.allowed_image_paths.add(path)
+        session.allowed_image_references[reference_id] = path
     return path, None
 
 
@@ -398,7 +351,9 @@ def media_reference_error(code: str, message: str, retryable: bool) -> str:
 def invoke_video_analyze(session: Any, args: dict[str, Any], next_call: Any) -> Any:
     """Stop only an unchanged terminal video-analysis retry."""
     with session.video_analyze_lock:
-        signature_key = session._tool_signature_key("video_analyze", args)
+        signature_args = dict(args)
+        signature_args.pop("_runtime_parent_call_id", None)
+        signature_key = session._tool_signature_key("video_analyze", signature_args)
         with session.lock:
             prior_code = session.native_non_retryable_failures.get(signature_key, "")
         if prior_code:
@@ -416,26 +371,137 @@ def invoke_video_analyze(session: Any, args: dict[str, Any], next_call: Any) -> 
                     "retryable": False,
                 },
             }, ensure_ascii=False, separators=(",", ":"))
-        requested_path = str(args.get("video_url") or "").strip()
-        parsed = urlparse(requested_path)
-        remote_url = parsed.scheme.lower() == "https"
-        try:
-            resolved_path = str(Path(requested_path).resolve(strict=True))
-        except (OSError, RuntimeError):
-            resolved_path = ""
-        if not remote_url and resolved_path not in session.allowed_video_paths:
+        reference_id = str(args.get("video_url") or "").strip()
+        if not reference_id.startswith(("asset_", "output_")):
             result: Any = media_reference_error(
                 "video_analysis_scope_denied",
                 "video_analyze requires a run-bound asset_id or output_id",
                 False,
             )
         else:
-            result = next_call(args) if callable(next_call) else args
+            evidence, error = prepare_video_evidence(
+                session,
+                reference_id,
+                args.get("include_transcript") is True,
+                str(args.get("_runtime_parent_call_id") or ""),
+            )
+            if error is not None:
+                result = error
+            else:
+                from tools.runtime_video_evidence import analyze_runtime_video_evidence
+
+                question = str(args.get("question") or "")
+                prompt = (
+                    "Describe visible content, text, subjects, settings, and changes "
+                    "across the sampled video timeline. Do not claim unsampled motion, "
+                    "timing, audio, or transitions as observed. Then answer this "
+                    f"question:\n\n{question}"
+                )
+                model = (
+                    os.getenv("AUXILIARY_VIDEO_MODEL", "").strip()
+                    or os.getenv("AUXILIARY_VISION_MODEL", "").strip()
+                    or None
+                )
+                result = analyze_runtime_video_evidence(
+                    evidence,
+                    prompt,
+                    model,
+                    args.get("include_transcript") is True,
+                )
         code = _native_non_retryable_failure_code(result)
         if code:
             with session.lock:
                 session.native_non_retryable_failures[signature_key] = code
         return result
+
+
+def prepare_video_evidence(
+    session: Any,
+    reference_id: str,
+    include_transcript: bool,
+    parent_call_id: str,
+) -> tuple[dict[str, Any], str | None]:
+    request_id = "video_evidence_" + hashlib.sha256(
+        (parent_call_id + "\x00" + reference_id + "\x00" + str(include_transcript)).encode()
+    ).hexdigest()
+    pending = PendingMediaReference()
+    with session.lock:
+        if request_id in session.pending_controls:
+            return {}, media_reference_error(
+                "media_reference_conflict",
+                "duplicate active video evidence preparation",
+                False,
+            )
+        session.pending_controls[request_id] = pending
+    session.emit("runtime_control_request", {
+        "request_id": request_id,
+        "kind": "video_evidence.prepare",
+        "reference_id": reference_id,
+        "media_type": "video",
+        "include_transcript": include_transcript,
+    })
+    wait_timeout = session.deadline_seconds or session.unbounded_tool_wait_seconds
+    if not pending.ready.wait(wait_timeout) or session.interrupted.is_set():
+        with session.lock:
+            session.pending_controls.pop(request_id, None)
+        return {}, media_reference_error(
+            "media_evidence_unavailable",
+            "video evidence preparation did not complete before the Run deadline",
+            True,
+        )
+    control_result = pending.result or {}
+    if not control_result.get("ok"):
+        error = control_result.get("error")
+        if not isinstance(error, dict):
+            error = {}
+        return {}, media_reference_error(
+            str(error.get("code") or "media_evidence_unavailable"),
+            str(error.get("message") or "video evidence is unavailable"),
+            bool(error.get("retryable")),
+        )
+    try:
+        evidence = validate_video_evidence(control_result.get("result"), reference_id)
+    except (TypeError, ValueError, binascii.Error):
+        return {}, media_reference_error(
+            "invalid_video_evidence",
+            "video evidence did not satisfy the bounded Runtime contract",
+            False,
+        )
+    return evidence, None
+
+
+def validate_video_evidence(value: Any, reference_id: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or value.get("reference_id") != reference_id:
+        raise ValueError("video evidence identity mismatch")
+    frames = value.get("frames")
+    if not isinstance(frames, list) or not 3 <= len(frames) <= 24:
+        raise ValueError("video evidence frame count is invalid")
+    total_bytes = 0
+    for frame in frames:
+        if not isinstance(frame, dict) or frame.get("mime_type") != "image/jpeg":
+            raise ValueError("video evidence frame is invalid")
+        total_bytes += _validate_evidence_blob(frame)
+    audio = value.get("audio_proxy")
+    if audio is not None:
+        if not isinstance(audio, dict) or audio.get("mime_type") != "audio/ogg":
+            raise ValueError("video evidence audio proxy is invalid")
+        total_bytes += _validate_evidence_blob(audio)
+    if total_bytes <= 0 or total_bytes > _MAX_VIDEO_EVIDENCE_BYTES:
+        raise ValueError("video evidence exceeds the Runtime projection budget")
+    if value.get("sampling") != "uniform_midpoint":
+        raise ValueError("video evidence sampling strategy is invalid")
+    return value
+
+
+def _validate_evidence_blob(blob: dict[str, Any]) -> int:
+    encoded = blob.get("data")
+    digest = str(blob.get("sha256") or "")
+    if not isinstance(encoded, str) or len(digest) != 64:
+        raise ValueError("video evidence blob metadata is invalid")
+    data = base64.b64decode(encoded, validate=True)
+    if not data or hashlib.sha256(data).hexdigest() != digest:
+        raise ValueError("video evidence blob digest is invalid")
+    return len(data)
 
 
 def _native_non_retryable_failure_code(result: Any) -> str:

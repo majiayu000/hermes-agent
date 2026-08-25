@@ -113,7 +113,14 @@ async def test_run_agent_binds_api_session_context_for_tool_env(adapter, monkeyp
     )
 
     assert result["session_id"] == "request-session"
-    assert usage == {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    assert usage == {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "total_tokens": 0,
+        "api_calls": 0,
+    }
     assert observed == {
         "task_id": "request-session",
         "context_session_id": "request-session",

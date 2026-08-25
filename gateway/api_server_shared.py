@@ -91,13 +91,8 @@ DEFAULT_PORT = 8642
 MAX_STORED_RESPONSES = 100
 MAX_REQUEST_BYTES = 10_000_000  # 10 MB — accommodates long agent conversations with tool calls
 MAX_RUNTIME_ATTACHMENT_BYTES = 64 << 20
-# /v1/runtime/runs carries trusted private attachments inline as base64. Keep
-# the ordinary API cap plus the exact worst-case base64 expansion promised by
-# the Runtime attachment contract; every other route remains at 10 MB.
-MAX_RUNTIME_REQUEST_BYTES = (
-    MAX_REQUEST_BYTES
-    + 4 * ((MAX_RUNTIME_ATTACHMENT_BYTES + 2) // 3)
-)
+# Runtime Run requests contain opaque references, never source media bytes.
+MAX_RUNTIME_REQUEST_BYTES = MAX_REQUEST_BYTES
 CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS = 30.0
 MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array

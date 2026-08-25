@@ -1,5 +1,13 @@
 # Runtime contract changelog
 
+## 1.5.0 — 2026-08-24
+
+- Remove inline source-media `attachments` from Run requests; initial and
+  resumed Runs carry opaque `attachment_references` only.
+- Restrict `media_reference.resolve` to bounded images and add
+  `video_evidence.prepare` for digest-addressed uniform JPEG samples plus an
+  optional bounded audio proxy.
+
 ## 1.4.0 — 2026-08-23
 
 - Replace the untyped Runtime interrupt control with negotiated suspend,

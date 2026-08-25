@@ -52,10 +52,11 @@ def project_runtime_media_tool(definition: dict[str, Any]) -> dict[str, Any]:
     elif name == "video_analyze":
         function["description"] = (
             "Analyze a video owned by this Run. Pass video_url as a run-bound "
-            "asset_id, a run-owned output_id, or an HTTPS URL."
+            "asset_id or a run-owned output_id. The source stays in the data plane; "
+            "the model receives only bounded derived evidence."
         )
         if isinstance(properties.get("video_url"), dict):
             properties["video_url"]["description"] = (
-                "A run-bound asset_id, a run-owned output_id, or an HTTPS URL."
+                "A run-bound asset_id or a run-owned output_id."
             )
     return projected

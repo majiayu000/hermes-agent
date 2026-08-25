@@ -31,7 +31,7 @@ def _session(result: dict, media_dir: str) -> SimpleNamespace:
 
     session.emit = emit
     session.materialize_media_reference = lambda attachment: _runtime_attachment_parts(
-        [attachment], image_dir=media_dir, video_dir=media_dir
+        [attachment], image_dir=media_dir
     )
     return session
 
@@ -90,7 +90,7 @@ def test_plain_http_reference_is_rejected_before_provider_submission() -> None:
         assert payload["error"]["provider_submission_started"] is False
 
 
-def test_unbound_output_returns_structured_pre_submission_error() -> None:
+def test_unbound_output_image_returns_structured_pre_submission_error() -> None:
     with tempfile.TemporaryDirectory() as media_dir:
         session = _session({
             "ok": False,
@@ -101,7 +101,7 @@ def test_unbound_output_returns_structured_pre_submission_error() -> None:
             },
         }, media_dir)
         _, error = resolve_media_arguments(
-            session, {"video_url": "output_foreign"}, ("video_url",), "video", "call_3"
+            session, {"image_url": "output_foreign"}, ("image_url",), "image", "call_3"
         )
         assert error is not None
         assert '"code":"output_reference_not_bound"' in error

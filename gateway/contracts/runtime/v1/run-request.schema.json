@@ -151,12 +151,6 @@
         }
       }
     },
-    "attachments": {
-      "type": "array",
-      "items": {
-        "type": "object"
-      }
-    },
     "skill_manifest": {
       "type": "object"
     },
@@ -286,7 +280,7 @@
   "x-ultra-contract": {
     "name": "ultra.runtime.run-request",
     "major": 1,
-    "minor": 4,
+    "minor": 5,
     "features": [
       "invoked_skills.v1",
       "llm_egress.v1",
@@ -295,6 +289,7 @@
       "system_prompt_profiles.v1",
       "tool_result_replay.v1",
       "typed_run_control.v1",
+      "video_evidence_projection.v1",
       "vision_llm_egress.v1"
     ]
   }

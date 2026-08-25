@@ -31,6 +31,7 @@ RUNTIME_CAPABILITIES = (
     "delegated_tools",
     "model_contract_control",
     "media_reference_resolution",
+    "video_evidence_projection",
     "session_db_resume",
     "session_db_rebootstrap/v1",
     "suspend_attempt",

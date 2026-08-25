@@ -3,9 +3,14 @@ from hermes_state import SessionDB
 
 
 class _FakeAgent:
-    session_prompt_tokens = 1
+    session_prompt_tokens = 11
     session_completion_tokens = 2
-    session_total_tokens = 3
+    session_total_tokens = 13
+    session_input_tokens = 3
+    session_output_tokens = 2
+    session_cache_read_tokens = 7
+    session_cache_write_tokens = 1
+    session_api_calls = 4
 
     def __init__(self, session_id):
         self.session_id = session_id
@@ -113,7 +118,14 @@ def test_run_agent_sync_binds_principal_scope_and_sandbox_lease(tmp_path):
         "roles": ("member",),
         "sandbox_id": "sandbox-1",
     }
-    assert usage == {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
+    assert usage == {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "cache_read_tokens": 7,
+        "cache_write_tokens": 1,
+        "total_tokens": 13,
+        "api_calls": 4,
+    }
 
 
 def test_run_agent_sync_issues_persistent_sandbox_lease(tmp_path):

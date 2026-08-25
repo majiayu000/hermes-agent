@@ -35,6 +35,9 @@ def test_runtime_video_contract_preserves_name_and_accepts_all_stable_references
 
     function = projected["function"]
     assert function["name"] == "video_analyze"
-    for token in ("asset_id", "output_id", "HTTPS URL"):
+    for token in ("asset_id", "output_id"):
         assert token in function["description"]
         assert token in function["parameters"]["properties"]["video_url"]["description"]
+    assert "HTTPS URL" not in function["description"]
+    assert "HTTPS URL" not in function["parameters"]["properties"]["video_url"]["description"]
+    assert "bounded derived evidence" in function["description"]

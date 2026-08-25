@@ -133,6 +133,47 @@ def build_video_frame_analysis_message(
     return {"role": "user", "content": content}
 
 
+def build_video_evidence_analysis_message(
+    user_prompt: str,
+    evidence: dict[str, object],
+) -> dict[str, object]:
+    """Package Orchestrator-derived JPEG evidence without reading the source video."""
+    frames = evidence.get("frames")
+    if not isinstance(frames, list) or not frames:
+        raise VideoFrameExtractionError("Video evidence contains no frames.")
+    content: list[dict[str, object]] = [{
+        "type": "text",
+        "text": (
+            f"{user_prompt}\n\n"
+            "These JPEGs are a bounded, uniformly sampled projection prepared by "
+            "the trusted video data plane. Analyze only what the labeled frames "
+            "support and preserve chronological order."
+        ),
+    }]
+    for index, frame in enumerate(frames, start=1):
+        if not isinstance(frame, dict):
+            raise VideoFrameExtractionError("Video evidence frame is invalid.")
+        timestamp = float(frame.get("timestamp_seconds") or 0.0)
+        ratio = float(frame.get("ratio") or 0.0)
+        encoded = frame.get("data")
+        if not isinstance(encoded, str) or not encoded:
+            raise VideoFrameExtractionError("Video evidence frame data is missing.")
+        content.extend([
+            {
+                "type": "text",
+                "text": (
+                    f"Timeline frame {index}/{len(frames)} at "
+                    f"{_format_timestamp(timestamp)} ({ratio:.0%} of source duration)."
+                ),
+            },
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{encoded}"},
+            },
+        ])
+    return {"role": "user", "content": content}
+
+
 def _format_timestamp(seconds: float) -> str:
     total_milliseconds = max(0, round(seconds * 1000))
     minutes, remainder = divmod(total_milliseconds, 60_000)

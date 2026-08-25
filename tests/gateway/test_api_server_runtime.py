@@ -27,20 +27,18 @@ from gateway.api_server_runtime import (
     _failed_tool_result_projection,
     _normalize_runtime_messages,
     _pin_run_model,
-    _project_runtime_resume_attachments,
     _retry_session_db_history,
     _resume_session_db_history,
     _runtime_attachment_parts,
     _runtime_failure_code,
     _runtime_allowed_skill_digests,
-    _runtime_image_paths,
     _runtime_allowed_skill_names,
     _runtime_skill_projections,
     _runtime_history_tool_names,
-    _runtime_video_paths,
     _runtime_tool_middleware,
     _validate_runtime_artifact_manifest,
 )
+from gateway.runtime_media_references import runtime_image_paths as _runtime_image_paths
 from gateway.runtime_prompt_context import (
     attachment_reference_prompt,
     replacement_system_prompt,
@@ -81,11 +79,8 @@ def test_replacement_system_prompt_logs_only_safe_digest_diagnostics(caplog):
 
 
 @pytest.mark.asyncio
-async def test_runtime_run_body_limit_matches_inline_attachment_contract():
-    assert MAX_RUNTIME_REQUEST_BYTES >= (
-        MAX_REQUEST_BYTES
-        + 4 * ((MAX_RUNTIME_ATTACHMENT_BYTES + 2) // 3)
-    )
+async def test_runtime_run_body_limit_matches_reference_only_contract():
+    assert MAX_RUNTIME_REQUEST_BYTES == MAX_REQUEST_BYTES
 
     async def consume(request):
         body = await request.read()
@@ -102,8 +97,7 @@ async def test_runtime_run_body_limit_matches_inline_attachment_contract():
     try:
         payload = b"x" * (MAX_REQUEST_BYTES + 1)
         accepted = await client.post("/v1/runtime/runs", data=payload)
-        assert accepted.status == 200
-        assert await accepted.json() == {"bytes": len(payload)}
+        assert accepted.status == 413
 
         rejected = await client.post("/v1/responses", data=payload)
         assert rejected.status == 413
@@ -519,37 +513,16 @@ def test_runtime_attachment_parts_reject_mismatched_asset_and_reference_ids(tmp_
 
 
 def test_runtime_attachment_parts_materialize_video_for_native_analysis(tmp_path):
-    parts = _runtime_attachment_parts([{
-        "role": "user_upload",
-        "asset_id": "asset_video",
-        "filename": "../../clip.mp4",
-        "media_type": "video",
-        "mime_type": "video/mp4",
-        "data": base64.b64encode(b"video-bytes").decode(),
-    }], video_dir=tmp_path)
-
-    paths = _runtime_video_paths(parts)
-    assert len(paths) == 1
-    video_path = paths[0]
-    assert video_path.parent == tmp_path
-    assert video_path.name == hashlib.sha256(b"asset_video").hexdigest()[:24] + ".mp4"
-    assert video_path.read_bytes() == b"video-bytes"
-    assert parts == [{
-        "type": "text",
-        "text": (
-            "[Attached video: ../../clip.mp4; role=user_upload; asset_id=asset_video. "
-            "Analyze the source video with video_analyze using video_url=asset_video "
-            "and include_transcript=true. The Runtime resolves this opaque, "
-            "run-bound reference to its private materialized file. The tool performs "
-            "authoritative server-side frame sampling and reports its temporal coverage.]"
-        ),
-        "_runtime_reference_id": "asset_video",
-        "_runtime_video_path": str(video_path),
-    }]
+    with pytest.raises(ValueError, match="only accepts images"):
+        _runtime_attachment_parts([{
+            "role": "user_upload", "asset_id": "asset_video",
+            "filename": "clip.mp4", "media_type": "video",
+            "mime_type": "video/mp4", "data": base64.b64encode(b"video").decode(),
+        }], image_dir=tmp_path)
 
 
 def test_runtime_attachment_parts_require_private_video_directory():
-    with pytest.raises(ValueError, match="video materialization directory"):
+    with pytest.raises(ValueError, match="only accepts images"):
         _runtime_attachment_parts([{
             "role": "user_upload",
             "asset_id": "asset_video",
@@ -561,48 +534,18 @@ def test_runtime_attachment_parts_require_private_video_directory():
 
 
 def test_runtime_video_tool_is_scoped_to_materialized_attachment(tmp_path):
-    allowed = tmp_path / "asset_video.mp4"
-    allowed.write_bytes(b"video")
     queue = asyncio.Queue()
     session = RuntimeBridgeSession(
-        "run_video",
-        asyncio.new_event_loop(),
-        queue,
-        [],
-        1_000,
-        "agent_video",
-        allowed_video_paths={str(allowed)},
-        allowed_video_references={"output_video": str(allowed)},
+        "run_video", asyncio.new_event_loop(), queue, [], 1_000, "agent_video",
     )
     runtime_module._SESSIONS["agent_video"] = session
     try:
-        seen = []
-        accepted = _runtime_tool_middleware(
-            tool_name="video_analyze",
-            args={"video_url": "output_video", "question": "Summarize it"},
-            session_id="agent_video",
-            tool_call_id="video_ok",
-            next_call=lambda args: seen.append(args) or '{"success":true}',
-        )
-        assert accepted == '{"success":true}'
-        assert seen == [{"video_url": str(allowed), "question": "Summarize it"}]
-
-        remote = _runtime_tool_middleware(
+        denied = _runtime_tool_middleware(
             tool_name="video_analyze",
             args={"video_url": "https://example.com/reference.mp4", "question": "Summarize it"},
             session_id="agent_video",
             tool_call_id="video_remote",
-            next_call=lambda args: seen.append(args) or '{"success":true}',
-        )
-        assert remote == '{"success":true}'
-        assert seen[-1]["video_url"] == "https://example.com/reference.mp4"
-
-        denied = _runtime_tool_middleware(
-            tool_name="video_analyze",
-            args={"video_url": os.devnull, "question": "Read another file"},
-            session_id="agent_video",
-            tool_call_id="video_denied",
-            next_call=lambda _args: pytest.fail("untrusted local path reached video tool"),
+            next_call=lambda _args: pytest.fail("remote source reached video tool"),
         )
         denied_payload = json.loads(denied)
         assert denied_payload["success"] is False
@@ -614,69 +557,50 @@ def test_runtime_video_tool_is_scoped_to_materialized_attachment(tmp_path):
 
 
 def test_runtime_video_tool_blocks_changed_retry_after_terminal_failure(tmp_path):
-    allowed = tmp_path / "asset_video.mp4"
-    allowed.write_bytes(b"video")
     queue = asyncio.Queue()
     session = RuntimeBridgeSession(
-        "run_video_terminal",
-        asyncio.new_event_loop(),
-        queue,
-        [],
-        1_000,
+        "run_video_terminal", asyncio.new_event_loop(), queue, [], 1_000,
         "agent_video_terminal",
-        allowed_video_paths={str(allowed)},
     )
     halt_decisions = []
     session.agent_ref[0] = SimpleNamespace(
         _set_tool_guardrail_halt=halt_decisions.append,
     )
     runtime_module._SESSIONS["agent_video_terminal"] = session
-    calls = []
-
-    def fail_once(args):
-        calls.append(args)
-        return json.dumps({
-            "success": False,
-            "error": "upstream model rejected the request",
-            "error_code": "video_analysis_model_incompatible",
-            "retryable": False,
-        })
-
     try:
         first = _runtime_tool_middleware(
             tool_name="video_analyze",
-            args={"video_url": str(allowed), "question": "Summarize it"},
+            args={"video_url": "https://example.com/video.mp4", "question": "Summarize it"},
             session_id="agent_video_terminal",
             tool_call_id="video_first",
-            next_call=fail_once,
+            next_call=lambda _args: pytest.fail("invalid source reached video tool"),
         )
-        assert json.loads(first)["error_code"] == "video_analysis_model_incompatible"
+        assert json.loads(first)["error"]["code"] == "video_analysis_scope_denied"
 
         changed = _runtime_tool_middleware(
             tool_name="video_analyze",
-            args={"video_url": str(allowed), "question": "Try a different prompt"},
+            args={"video_url": "https://example.com/video.mp4", "question": "Try a different prompt"},
             session_id="agent_video_terminal",
             tool_call_id="video_second",
-            next_call=fail_once,
+            next_call=lambda _args: pytest.fail("invalid source reached video tool"),
         )
-        assert json.loads(changed)["error_code"] == "video_analysis_model_incompatible"
+        assert json.loads(changed)["error"]["code"] == "video_analysis_scope_denied"
 
         unchanged = _runtime_tool_middleware(
             tool_name="video_analyze",
-            args={"video_url": str(allowed), "question": "Try a different prompt"},
+            args={"video_url": "https://example.com/video.mp4", "question": "Try a different prompt"},
             session_id="agent_video_terminal",
             tool_call_id="video_third",
-            next_call=fail_once,
+            next_call=lambda _args: pytest.fail("invalid source reached video tool"),
         )
         assert json.loads(unchanged)["error"] == {
             "code": "repeated_non_retryable_tool_call",
             "message": (
                 "Blocked unchanged video_analyze retry after non-retryable error "
-                "video_analysis_model_incompatible."
+                "video_analysis_scope_denied."
             ),
             "retryable": False,
         }
-        assert len(calls) == 2
         assert len(halt_decisions) == 1
         assert halt_decisions[0].code == "repeated_non_retryable_tool_call"
         assert halt_decisions[0].should_halt is True
@@ -950,7 +874,7 @@ def test_private_runtime_activity_event_redacts_arguments_through_real_encoder()
 
 
 @pytest.mark.asyncio
-async def test_runtime_bridge_delivers_image_attachment_as_multimodal_user_content():
+async def test_runtime_bridge_rejects_inline_image_attachment_bytes():
     captured = {}
 
     class AttachmentAdapter(_TestRuntimeAdapter):
@@ -1040,22 +964,14 @@ async def test_runtime_bridge_delivers_image_attachment_as_multimodal_user_conte
                 "data": encoded,
             }],
         })
-        assert response.status == 200
-        events = [json.loads(line) async for line in response.content]
-        assert events[-1]["type"] == "completed"
-        content = captured["user_message"]
-        assert isinstance(content, list)
-        assert content[0] == {"type": "text", "text": "describe it"}
-        assert content[-1]["image_url"]["url"] == f"data:image/png;base64,{encoded}"
-        assert captured["force_native_vision"] is False
-        assert captured["tool_result_image_mode"] == "attach_by_ref"
-        assert not Path(captured["image_path"]).exists()
+        assert response.status == 422
+        assert (await response.json())["error"]["code"] == "invalid_param"
     finally:
         await client.close()
 
 
 @pytest.mark.asyncio
-async def test_runtime_bridge_exposes_scoped_video_analysis_and_cleans_source_file():
+async def test_runtime_bridge_rejects_inline_video_source_bytes():
     captured = {}
 
     class VideoAttachmentAdapter(_TestRuntimeAdapter):
@@ -1137,10 +1053,8 @@ async def test_runtime_bridge_exposes_scoped_video_analysis_and_cleans_source_fi
                 "data": base64.b64encode(b"complete-video").decode(),
             }],
         })
-        assert response.status == 200
-        events = [json.loads(line) async for line in response.content]
-        assert events[-1]["type"] == "completed"
-        assert not Path(captured["video_path"]).exists()
+        assert response.status == 422
+        assert (await response.json())["error"]["code"] == "invalid_param"
     finally:
         await client.close()
 
@@ -3095,31 +3009,10 @@ def test_artifact_manifest_validator_is_bounded_and_typed():
 
 
 def test_resume_attachment_projection_strips_private_runtime_metadata():
-    durable_history = [{
-        "role": "tool",
-        "tool_call_id": "call-media",
-        "content": '{"asset_id":"asset-1"}',
-    }]
-    private_parts = [
-        {
-            "type": "text",
-            "text": "[Attached image: output.png; image_url=/tmp/output.png. Keep it scoped.]",
-            "_runtime_image_path": "/tmp/output.png",
-        },
-        {
-            "type": "image_url",
-            "image_url": {"url": "data:image/png;base64,cGl4ZWxz"},
-        },
-    ]
+    from gateway.runtime_contract import RUNTIME_RUN_REQUEST_FIELDS
 
-    projected = _project_runtime_resume_attachments(durable_history, private_parts)
-
-    assert projected is not durable_history
-    assert durable_history[-1]["content"] == '{"asset_id":"asset-1"}'
-    assert isinstance(projected[-1]["content"], str)
-    assert "_runtime_image_path" not in projected[-1]["content"]
-    assert "data:image" not in projected[-1]["content"]
-    assert "image_url=/tmp/output.png" in projected[-1]["content"]
+    assert "attachments" not in RUNTIME_RUN_REQUEST_FIELDS
+    assert "attachment_references" in RUNTIME_RUN_REQUEST_FIELDS
 
 
 def test_seed_runtime_session_reports_seed_and_cleanup_failures():
@@ -3739,10 +3632,8 @@ async def test_runtime_session_db_resume_projects_generated_output_after_durable
                 "data": base64.b64encode(b"generated-pixels").decode(),
             }],
         ))
-        assert response.status == 200
-        events = [json.loads(line) async for line in response.content]
-        assert events[-1]["type"] == "completed"
-        assert not Path(captured["image_path"]).exists()
+        assert response.status == 422
+        assert (await response.json())["error"]["code"] == "invalid_param"
     finally:
         await client.close()
 

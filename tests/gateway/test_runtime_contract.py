@@ -51,8 +51,9 @@ def test_runtime_manifest_contract_is_negotiable_and_contains_real_limits():
             "session_db_rebootstrap.v1",
             "system_prompt_profiles.v1",
             "tool_result_replay.v1",
-            "typed_run_control.v1",
-            "vision_llm_egress.v1",
+                "typed_run_control.v1",
+                "video_evidence_projection.v1",
+                "vision_llm_egress.v1",
         ],
         "limits": {
             "max_request_bytes": 98_000_000,

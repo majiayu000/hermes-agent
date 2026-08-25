@@ -1,7 +1,7 @@
 contract_name: ultra.runtime
 contract_major: 1
-min_minor: 4
-max_minor: 4
+min_minor: 5
+max_minor: 5
 runtime_protocol_version: "2"
 schemas:
   - error.schema.json
@@ -24,6 +24,7 @@ features:
   - system_prompt_profiles.v1
   - tool_result_replay.v1
   - typed_run_control.v1
+  - video_evidence_projection.v1
   - vision_llm_egress.v1
 runtime_frame_types:
   - run_started

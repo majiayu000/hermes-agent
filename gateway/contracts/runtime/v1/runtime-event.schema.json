@@ -114,7 +114,29 @@
                     "maxLength": 512,
                     "pattern": "^(asset|output)_[A-Za-z0-9][A-Za-z0-9._-]*$"
                   },
-                  "media_type": {"enum": ["image", "video"]}
+                  "media_type": {"const": "image"}
+                }
+              },
+              {
+                "additionalProperties": false,
+                "required": [
+                  "request_id",
+                  "kind",
+                  "reference_id",
+                  "media_type",
+                  "include_transcript"
+                ],
+                "properties": {
+                  "request_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                  "kind": {"const": "video_evidence.prepare"},
+                  "reference_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512,
+                    "pattern": "^(asset|output)_[A-Za-z0-9][A-Za-z0-9._-]*$"
+                  },
+                  "media_type": {"const": "video"},
+                  "include_transcript": {"type": "boolean"}
                 }
               }
             ]
@@ -222,6 +244,6 @@
   "x-ultra-contract": {
     "name": "ultra.runtime.runtime-event",
     "major": 1,
-    "minor": 4
+    "minor": 5
   }
 }

@@ -63,13 +63,9 @@ from gateway.runtime_media_references import (
     image_analysis_scope_error as _image_analysis_scope_error,
     image_analysis_sources as _image_analysis_sources,
     invoke_video_analyze as _invoke_video_analyze,
-    public_runtime_attachment_parts as _public_runtime_attachment_parts,
     resolve_media_arguments as _resolve_media_arguments,
     rewrite_known_media_references as _rewrite_runtime_media_references,
     runtime_attachment_parts as _runtime_attachment_parts,
-    runtime_image_paths as _runtime_image_paths,
-    runtime_reference_paths as _runtime_reference_paths,
-    runtime_video_paths as _runtime_video_paths,
 )
 from gateway.runtime_native_media_tools import (
     native_image_tool_definition as _native_image_tool_definition,
@@ -78,7 +74,6 @@ from gateway.runtime_native_media_tools import (
 )
 
 logger = logging.getLogger(__name__)
-
 _SESSIONS: dict[str, "RuntimeBridgeSession"] = {}
 _SESSIONS_LOCK = threading.RLock()
 _REGISTERED_MANAGERS: set[int] = set()
@@ -879,65 +874,6 @@ def _message_text(content: Any) -> str:
     return json.dumps(content, ensure_ascii=False, separators=(",", ":"))
 
 
-def _runtime_image_references(parts: list[dict[str, Any]]) -> dict[str, str]:
-    return _runtime_reference_paths(parts, "_runtime_image_path")
-
-
-def _runtime_video_references(parts: list[dict[str, Any]]) -> dict[str, str]:
-    return _runtime_reference_paths(parts, "_runtime_video_path")
-
-
-def _project_runtime_resume_attachments(
-    history: list[dict[str, Any]],
-    attachment_parts: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Add resume media to a transient tool-message projection only."""
-    if not attachment_parts:
-        return history
-    if not history or history[-1].get("role") != "tool":
-        raise _RuntimeSessionStateError(
-            "runtime_history_conflict",
-            "resume attachments require a durable tool result",
-            status=409,
-        )
-    projected = list(history)
-    tail = dict(projected[-1])
-    content = tail.get("content")
-    if isinstance(content, list):
-        base_parts = list(content)
-    elif content is None:
-        base_parts = []
-    else:
-        base_parts = [{"type": "text", "text": str(content)}]
-    # Resume media is appended to a durable role=tool result.  Never place
-    # pixels in that message: the selected model may accept user images while
-    # rejecting multipart tool results.  Retain the asset/path reference so
-    # the model can pass it to another media tool or call image_analyze.
-    reference_text: list[str] = []
-    for part in [
-        *base_parts,
-        *_public_runtime_attachment_parts(attachment_parts),
-    ]:
-        if isinstance(part, str):
-            if part.strip():
-                reference_text.append(part.strip())
-            continue
-        if not isinstance(part, dict):
-            continue
-        if part.get("type") in {"image_url", "input_image"}:
-            continue
-        if part.get("type") in {"text", "input_text"}:
-            text = str(part.get("text") or "").strip()
-            if text:
-                reference_text.append(text)
-    tail["content"] = (
-        "\n\n".join(reference_text)
-        or "[Generated media is available through its retained asset reference.]"
-    )
-    projected[-1] = tail
-    return projected
-
-
 def _tool_schemas(definitions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     schemas: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -1225,20 +1161,8 @@ def _runtime_tool_middleware(**kwargs: Any) -> Any:
             if resolved_path not in session.allowed_image_paths:
                 return _image_analysis_scope_error()
     if tool_name == "video_analyze":
-        args = _rewrite_runtime_media_references(
-            args,
-            ("video_url",),
-            session.allowed_video_references,
-        )
-        args, reference_error = _resolve_media_arguments(
-            session,
-            args,
-            ("video_url",),
-            "video",
-            str(kwargs.get("tool_call_id") or ""),
-        )
-        if reference_error is not None:
-            return reference_error
+        args = dict(args)
+        args["_runtime_parent_call_id"] = str(kwargs.get("tool_call_id") or "")
         return session._invoke_video_analyze(args, next_call)
     if tool_name in _RUNTIME_NATIVE_TOOLS:
         return next_call(args) if callable(next_call) else args
@@ -1300,9 +1224,7 @@ class RuntimeBridgeSession:
         allowed_skill_names: set[str] | None = None,
         allowed_skill_projections: dict[str, RuntimeSkillProjection] | None = None,
         allowed_image_paths: set[str] | None = None,
-        allowed_video_paths: set[str] | None = None,
         allowed_image_references: dict[str, str] | None = None,
-        allowed_video_references: dict[str, str] | None = None,
         media_temp_dir: str = "",
     ) -> None:
         self.run_id = run_id
@@ -1331,25 +1253,15 @@ class RuntimeBridgeSession:
             str(Path(path).resolve())
             for path in (allowed_image_paths or set())
         }
-        self.allowed_video_paths = {
-            str(Path(path).resolve())
-            for path in (allowed_video_paths or set())
-        }
         self.allowed_image_references = {
             reference_id: resolved_path
             for reference_id, path in (allowed_image_references or {}).items()
             if reference_id
             and (resolved_path := str(Path(path).resolve())) in self.allowed_image_paths
         }
-        self.allowed_video_references = {
-            reference_id: resolved_path
-            for reference_id, path in (allowed_video_references or {}).items()
-            if reference_id
-            and (resolved_path := str(Path(path).resolve())) in self.allowed_video_paths
-        }
         self.unbounded_tool_wait_seconds = _UNBOUNDED_TOOL_WAIT_CAP_SECONDS
         self.materialize_media_reference = lambda attachment: _runtime_attachment_parts(
-            [attachment], image_dir=media_temp_dir, video_dir=media_temp_dir
+            [attachment], image_dir=media_temp_dir
         )
         self.deadline_seconds = max(0.001, deadline_ms / 1000) if deadline_ms > 0 else None
         self.local_activities: dict[str, str] = {}
@@ -1952,26 +1864,7 @@ class APIServerRuntimeMixin:
                 ) from exc
             schemas = _tool_schemas(definitions)
             tool_exposure = build_runtime_tool_exposure(definitions, schemas)
-            attachments = body.get("attachments")
             media_temp_dir = tempfile.TemporaryDirectory(prefix="hermes-runtime-media-")
-            attachment_parts = _runtime_attachment_parts(
-                attachments,
-                image_dir=media_temp_dir.name if media_temp_dir else None,
-                video_dir=media_temp_dir.name if media_temp_dir else None,
-            )
-            runtime_image_paths = _runtime_image_paths(attachment_parts)
-            runtime_video_paths = _runtime_video_paths(attachment_parts)
-            runtime_image_references = _runtime_image_references(attachment_parts)
-            runtime_video_references = _runtime_video_references(attachment_parts)
-            if attachment_parts and intent not in {"resume", "retry", "rebootstrap"}:
-                last_user_index = len(normalized_messages) - 1
-                if normalized_messages[last_user_index].get("role") != "user":
-                    raise ValueError("attachments require a user message")
-                text = _message_text(normalized_messages[last_user_index].get("content"))
-                normalized_messages[last_user_index]["content"] = [
-                    {"type": "text", "text": text or "[Attached media]"},
-                    *_public_runtime_attachment_parts(attachment_parts),
-                ]
             db, agent_session_id, session_history = _load_runtime_session_history(
                 self,
                 requested_agent_session_id,
@@ -2014,10 +1907,6 @@ class APIServerRuntimeMixin:
                         session_history,
                         tool_results,
                     )
-                    session_history = _project_runtime_resume_attachments(
-                        session_history,
-                        attachment_parts,
-                    )
             elif intent == "new_turn":
                 current_id = normalized_messages[0]["message_id"]
                 history_ids = {
@@ -2040,10 +1929,6 @@ class APIServerRuntimeMixin:
                     agent_session_id,
                     session_history,
                     tool_results,
-                )
-                session_history = _project_runtime_resume_attachments(
-                    session_history,
-                    attachment_parts,
                 )
             else:
                 session_history = _retry_session_db_history(session_history)
@@ -2087,10 +1972,6 @@ class APIServerRuntimeMixin:
             tool_exposure=tool_exposure,
             allowed_skill_names=allowed_skill_names,
             allowed_skill_projections=allowed_skill_projections,
-            allowed_image_paths={str(path) for path in runtime_image_paths},
-            allowed_video_paths={str(path) for path in runtime_video_paths},
-            allowed_image_references=runtime_image_references,
-            allowed_video_references=runtime_video_references,
             media_temp_dir=media_temp_dir.name,
         )
         _ensure_runtime_middleware()

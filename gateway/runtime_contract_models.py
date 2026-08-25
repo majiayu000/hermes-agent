@@ -131,7 +131,6 @@ class RuntimeRunRequest(_StrictModel):
     attachment_references: (
         dict[str, list[Annotated[str, StringConstraints(min_length=1)]]] | None
     ) = None
-    attachments: list[JsonObject] | None = None
     skill_manifest: JsonObject | None = None
     invoked_skills: Annotated[list[SkillAlias], Field(max_length=8)] | None = None
     run_state: JsonObject | None = None
@@ -237,11 +236,21 @@ class RuntimeMediaReferenceControlRequest(_StrictModel):
     request_id: NonEmpty128
     kind: Literal["media_reference.resolve"]
     reference_id: NonEmpty512
-    media_type: Literal["image", "video"]
+    media_type: Literal["image"]
+
+
+class RuntimeVideoEvidenceControlRequest(_StrictModel):
+    request_id: NonEmpty128
+    kind: Literal["video_evidence.prepare"]
+    reference_id: NonEmpty512
+    media_type: Literal["video"]
+    include_transcript: bool
 
 
 RuntimeControlRequestPayload: TypeAlias = (
-    RuntimeModelContractControlRequest | RuntimeMediaReferenceControlRequest
+    RuntimeModelContractControlRequest
+    | RuntimeMediaReferenceControlRequest
+    | RuntimeVideoEvidenceControlRequest
 )
 
 
