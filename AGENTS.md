@@ -1366,7 +1366,10 @@ If you need to bypass isolation for fast feedback while debugging:
 python -m pytest tests/agent/test_foo.py -q --no-isolate
 ```
 
-Always run the full suite before pushing changes.
+Run focused checks appropriate to the changed behavior before pushing. A full
+suite is not a prerequisite for pushing or deploying to dev. For dev deployment
+requests, deploy the selected changes and verify them in dev; expand testing only
+when a failure or an unresolved concern justifies it.
 
 ### Don't write change-detector tests
 
