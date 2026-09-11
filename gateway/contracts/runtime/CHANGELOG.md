@@ -1,5 +1,13 @@
 # Runtime contract changelog
 
+## 1.6.0 — 2026-09-10
+
+Tool errors require code/message and preserve business extensions without a retry
+verdict requirement or silent text truncation. Failure result bodies and complete
+output references cross the same boundary as successful results. Product lifecycle
+errors retain their separate strict schema. Upgrade producer and consumer together.
+
+
 ## 1.5.0 — 2026-08-24
 
 - Remove inline source-media `attachments` from Run requests; initial and

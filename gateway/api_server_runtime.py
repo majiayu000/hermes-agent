@@ -125,36 +125,6 @@ _PLATFORM_MANAGED_MEDIA_PARAMETERS = frozenset(
     for aliases in _MEDIA_ROLE_PARAMETER_ALIASES.values()
     for parameter_name in aliases
 )
-_FAILED_ALLOWED_STRING_FIELDS = {"media_type", "model", "provider"}
-_FAILED_ALLOWED_STRING_LIST_FIELDS = {"aspect_ratios", "resolutions"}
-_FAILED_ALLOWED_INTEGER_LIST_FIELDS = {"durations"}
-_FAILED_ALLOWED_INTEGER_FIELDS = {"max_prompt_chars", "max_reference_images"}
-_FAILED_ALLOWED_FIELDS = (
-    _FAILED_ALLOWED_STRING_FIELDS
-    | _FAILED_ALLOWED_STRING_LIST_FIELDS
-    | _FAILED_ALLOWED_INTEGER_LIST_FIELDS
-    | _FAILED_ALLOWED_INTEGER_FIELDS
-)
-_FAILED_REQUIRED_ERROR_FIELDS = {"code", "message", "retryable"}
-_FAILED_OPTIONAL_ERROR_FIELDS = {"reason", "source", "support_id"}
-_TERMINAL_PLATFORM_ERROR_CODES = {
-    "auth_rejected",
-    "configuration_error",
-    "cost_budget_exceeded",
-    "idempotency_conflict",
-    "insufficient_credits",
-    "internal_error",
-    "invalid_tool_result",
-    "model_incompatible",
-    "model_not_allowed",
-    "provider_unavailable",
-    "scope_denied",
-    "tool_call_limit_exceeded",
-    "tool_not_allowed",
-    "tool_not_implemented",
-    "unsupported_capability",
-}
-
 # Each bridge run parks one thread for its whole duration (invoke_platform_tool
 # blocks on pending.ready.wait), so /v1/runtime/runs must never share the small
 # default executor. Runs use a dedicated bounded pool gated before streaming.
@@ -439,81 +409,17 @@ def _invalid_failed_tool_result() -> dict[str, Any]:
     }
 
 
-def _failed_allowed_value_is_safe(key: str, value: Any) -> bool:
-    if key in _FAILED_ALLOWED_STRING_FIELDS:
-        return isinstance(value, str) and bool(value.strip()) and len(value) <= 512
-    if key in _FAILED_ALLOWED_INTEGER_FIELDS:
-        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
-    if not isinstance(value, list) or len(value) > 64:
-        return False
-    if key in _FAILED_ALLOWED_STRING_LIST_FIELDS:
-        return all(
-            isinstance(item, str) and bool(item.strip()) and len(item) <= 128
-            for item in value
-        )
-    return all(
-        isinstance(item, int) and not isinstance(item, bool) and item > 0
-        for item in value
-    )
-
-
 def _failed_tool_result_projection(transport: Any) -> dict[str, Any]:
-    """Project a failed platform result without exposing arbitrary fields."""
-    if (
-        not isinstance(transport, dict)
-        or transport.get("ok") is not False
-        or set(transport) - {"call_id", "ok", "result", "error"}
-    ):
+    """Preserve executor-owned diagnostics; validate the envelope once."""
+    if not isinstance(transport, dict):
         return _invalid_failed_tool_result()
-    error = transport.get("error")
-    if (
-        not isinstance(error, dict)
-        or not _FAILED_REQUIRED_ERROR_FIELDS.issubset(error)
-        or set(error) - _FAILED_REQUIRED_ERROR_FIELDS - _FAILED_OPTIONAL_ERROR_FIELDS
-    ):
+    try:
+        decoded = decode_runtime_tool_result({"call_id": "control", **transport})
+    except ValueError:
         return _invalid_failed_tool_result()
-    code = error.get("code")
-    message = error.get("message")
-    retryable = error.get("retryable")
-    if (
-        not isinstance(code, str)
-        or not code.strip()
-        or len(code) > 128
-        or not isinstance(message, str)
-        or not message.strip()
-        or not isinstance(retryable, bool)
-    ):
+    if decoded.ok:
         return _invalid_failed_tool_result()
-    if len(message) > 2_000:
-        message = f"platform tool failed with {code}"
-    projection: dict[str, Any] = {
-        "error": {
-            "code": code,
-            "message": message,
-            "retryable": retryable,
-        },
-    }
-    for field in _FAILED_OPTIONAL_ERROR_FIELDS:
-        value = error.get(field)
-        if value is None:
-            continue
-        if not isinstance(value, str) or not value.strip() or len(value) > 512:
-            return _invalid_failed_tool_result()
-        projection["error"][field] = value
-    if "result" not in transport:
-        return projection
-    result = transport.get("result")
-    if not isinstance(result, dict) or set(result) != {"allowed"}:
-        return _invalid_failed_tool_result()
-    allowed = result.get("allowed")
-    if (
-        not isinstance(allowed, dict)
-        or set(allowed) - _FAILED_ALLOWED_FIELDS
-        or any(not _failed_allowed_value_is_safe(key, value) for key, value in allowed.items())
-    ):
-        return _invalid_failed_tool_result()
-    projection["result"] = {"allowed": dict(allowed)}
-    return projection
+    return {key: value for key, value in transport.items() if key not in {"call_id", "request_id", "ok"}}
 
 
 def _model_parameter_contract(
@@ -552,43 +458,6 @@ def _model_parameter_contract(
         if "default" in parameter:
             contract[name]["default"] = parameter.get("default")
     return model, digest, contract
-
-
-def _model_contract_preflight(
-    models: list[str],
-    contracts: dict[str, dict[str, dict[str, Any]]],
-) -> dict[str, Any]:
-    """Return exact new-model fields to the Agent before a paid submission."""
-    projected_contracts = []
-    for model in sorted(models):
-        parameters = []
-        for name, parameter in sorted(contracts[model].items()):
-            if name in _PLATFORM_MANAGED_MEDIA_PARAMETERS:
-                continue
-            projected = {
-                "name": name,
-                "type": parameter["type"],
-                "required": parameter["required"],
-                "options": parameter["options"],
-                "description": parameter["description"],
-            }
-            if "default" in parameter:
-                projected["default"] = parameter["default"]
-            parameters.append(projected)
-        projected_contracts.append({"model": model, "parameters": parameters})
-    return {
-        "error": {
-            "code": "model_schema_required",
-            "message": (
-                "Exact model parameters are now available. Reconcile every explicit "
-                "workflow value with the provider defaults before retrying; prompt prose "
-                "does not override omitted literal parameters."
-            ),
-            "retryable": True,
-        },
-        "recovery": {"action": "reconcile_model_parameters"},
-        "model_contracts": projected_contracts,
-    }
 
 
 def _parameter_value_matches_type(value: Any, parameter_type: str) -> bool:
@@ -1167,18 +1036,8 @@ def _runtime_tool_middleware(**kwargs: Any) -> Any:
     if tool_name in _RUNTIME_NATIVE_TOOLS:
         return next_call(args) if callable(next_call) else args
 
-    # Runtime Runs are capability-scoped by the Orchestrator.  A late MCP
-    # refresh, plugin hook, or registry mutation must never widen that scope
-    # with process-global Hermes tools.  Fail closed even if such a tool was
-    # accidentally advertised to the model, and halt the turn so it cannot
-    # retry or pivot through another unscoped local execution surface.
-    session._halt_tool_loop(
-        tool_name,
-        args,
-        "runtime_tool_scope_violation",
-        f"Tool '{tool_name}' is not authorized for this Runtime Run.",
-        1,
-    )
+    # Keep scope enforcement at dispatch; the Agent may explain the rejection
+    # or continue independent authorized work.
     return json.dumps({
         "error": {
             "code": "tool_not_allowed",
@@ -1205,7 +1064,6 @@ def _ensure_runtime_middleware() -> None:
 @dataclass
 class _PendingTool:
     name: str = ""
-    signature_key: str = ""
     ready: threading.Event = field(default_factory=threading.Event)
     result: dict[str, Any] | None = None
 
@@ -1266,8 +1124,6 @@ class RuntimeBridgeSession:
         self.deadline_seconds = max(0.001, deadline_ms / 1000) if deadline_ms > 0 else None
         self.local_activities: dict[str, str] = {}
         self.pending: dict[str, _PendingTool] = {}
-        self.non_retryable_failures: dict[str, str] = {}
-        self.native_non_retryable_failures: dict[str, str] = {}
         self.video_analyze_lock = threading.Lock()
         self.model_parameter_contracts: dict[str, dict[str, dict[str, Any]]] = {}
         self.model_contract_digests: dict[str, str] = {}
@@ -1315,27 +1171,6 @@ class RuntimeBridgeSession:
     def is_skill_allowed(self, name: str) -> bool:
         return bool(name) and name in self.allowed_skill_names
 
-    @staticmethod
-    def _tool_signature_key(name: str, args: dict[str, Any]) -> str:
-        canonical = json.dumps(args, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-        return name + ":" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-    def _halt_tool_loop(self, name: str, args: dict[str, Any], code: str, message: str, count: int) -> None:
-        agent = self.agent_ref[0]
-        setter = getattr(agent, "_set_tool_guardrail_halt", None)
-        if not callable(setter):
-            return
-        from agent.tool_guardrails import ToolCallSignature, ToolGuardrailDecision
-
-        setter(ToolGuardrailDecision(
-            action="halt",
-            code=code,
-            message=message,
-            tool_name=name,
-            count=count,
-            signature=ToolCallSignature.from_call(name, args),
-        ))
-
     def _invoke_video_analyze(self, args: dict[str, Any], next_call: Any) -> Any:
         return _invoke_video_analyze(self, args, next_call)
 
@@ -1355,7 +1190,6 @@ class RuntimeBridgeSession:
             for request in requests
             if isinstance(request, dict) and str(request.get("model") or "").strip()
         })
-        resolved_models: list[str] = []
         for model in models:
             with self.lock:
                 if model in self.model_parameter_contracts:
@@ -1391,12 +1225,13 @@ class RuntimeBridgeSession:
                     self.pending_controls.pop(request_id, None)
                 return {
                     "error": {
-                        "code": "model_schema_unavailable",
-                        "message": f"Runtime could not resolve the exact contract for model {model!r}",
-                        "retryable": False,
+                        "code": "run_interrupted" if self.interrupted.is_set() else "model_contract_timeout",
+                        "message": f"Model contract lookup {'was interrupted' if self.interrupted.is_set() else 'timed out'} for {model!r}; media submission did not begin",
                     }
                 }
             result = pending.result or {}
+            if result.get("ok") is False:
+                return _failed_tool_result_projection({key: value for key, value in result.items() if key != "request_id"})
             model_contract = (
                 _model_parameter_contract(result.get("result"))
                 if result.get("ok")
@@ -1413,12 +1248,6 @@ class RuntimeBridgeSession:
             with self.lock:
                 self.model_contract_digests[model] = model_contract[1]
                 self.model_parameter_contracts[model] = model_contract[2]
-            resolved_models.append(model)
-        if resolved_models:
-            return _model_contract_preflight(
-                resolved_models,
-                self.model_parameter_contracts,
-            )
         return None
 
     def emit(self, event_type: str, payload: dict[str, Any]) -> None:
@@ -1534,22 +1363,6 @@ class RuntimeBridgeSession:
     ) -> str | DeferredToolResult:
         if not call_id:
             return json.dumps({"error": {"code": "invalid_tool_request", "message": "tool call id is required"}})
-        signature_key = self._tool_signature_key(name, args)
-        with self.lock:
-            prior_code = self.non_retryable_failures.get(signature_key, "")
-        if prior_code:
-            message = (
-                f"Blocked unchanged retry of {name}: the previous call failed with "
-                f"non-retryable error {prior_code}."
-            )
-            self._halt_tool_loop(name, args, "repeated_non_retryable_tool_call", message, 2)
-            return json.dumps({
-                "error": {
-                    "code": "repeated_non_retryable_tool_call",
-                    "message": message,
-                    "retryable": False,
-                },
-            }, ensure_ascii=False, separators=(",", ":"))
         try:
             self._assert_active_tool_call_persisted(call_id, name)
         except _RuntimeSessionStateError as exc:
@@ -1575,16 +1388,8 @@ class RuntimeBridgeSession:
             self.model_parameter_contracts,
         )
         if contract_error is not None:
-            error = contract_error.get("error")
-            if isinstance(error, dict) and error.get("code") == "invalid_tool_arguments":
-                error["recovery"] = {
-                    "action": "correct_arguments",
-                    "same_arguments_allowed": False,
-                }
-                with self.lock:
-                    self.non_retryable_failures[signature_key] = "invalid_tool_arguments"
             return json.dumps(contract_error, ensure_ascii=False, separators=(",", ":"))
-        pending = _PendingTool(name=name, signature_key=signature_key)
+        pending = _PendingTool(name=name)
         with self.lock:
             if call_id in self.pending:
                 return json.dumps({"error": {"code": "idempotency_conflict", "message": "duplicate active tool call id"}})
@@ -1617,19 +1422,6 @@ class RuntimeBridgeSession:
         if result.get("ok"):
             return json.dumps(result.get("result"), ensure_ascii=False, separators=(",", ":"))
         failure = _failed_tool_result_projection(result)
-        error = failure["error"]  # same dict; recovery added below stays in failure
-        code = str(error.get("code") or "invalid_tool_result")
-        if code == "invalid_tool_arguments":
-            error["recovery"] = {
-                "action": "correct_arguments",
-                "same_arguments_allowed": False,
-            }
-        if error.get("retryable") is False and code != "domain_gate_required":
-            with self.lock:
-                self.non_retryable_failures[signature_key] = code
-            if code in _TERMINAL_PLATFORM_ERROR_CODES:
-                message = str(error.get("message") or f"{name} failed with {code}")
-                self._halt_tool_loop(name, args, code, message, 1)
         return json.dumps(failure, ensure_ascii=False, separators=(",", ":"))
 
     def submit_result(self, result: dict[str, Any]) -> bool:

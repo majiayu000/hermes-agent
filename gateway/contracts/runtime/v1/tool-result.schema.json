@@ -4,7 +4,10 @@
   "title": "Ultra Studio Runtime Tool Result Request",
   "type": "object",
   "additionalProperties": false,
-  "required": ["call_id", "ok"],
+  "required": [
+    "call_id",
+    "ok"
+  ],
   "properties": {
     "call_id": {
       "type": "string",
@@ -16,7 +19,25 @@
     },
     "result": {},
     "error": {
-      "$ref": "error.schema.json"
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
     }
   },
   "allOf": [
@@ -27,16 +48,20 @@
             "const": false
           }
         },
-        "required": ["ok"]
+        "required": [
+          "ok"
+        ]
       },
       "then": {
-        "required": ["error"]
+        "required": [
+          "error"
+        ]
       }
     }
   ],
   "x-ultra-contract": {
     "name": "ultra.runtime.tool-result",
     "major": 1,
-    "minor": 5
+    "minor": 6
   }
 }

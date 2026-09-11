@@ -349,28 +349,8 @@ def media_reference_error(code: str, message: str, retryable: bool) -> str:
 
 
 def invoke_video_analyze(session: Any, args: dict[str, Any], next_call: Any) -> str:
-    """Stop only an unchanged terminal video-analysis retry."""
+    """Resolve authorized evidence and return the native analysis outcome."""
     with session.video_analyze_lock:
-        signature_args = dict(args)
-        signature_args.pop("_runtime_parent_call_id", None)
-        signature_key = session._tool_signature_key("video_analyze", signature_args)
-        with session.lock:
-            prior_code = session.native_non_retryable_failures.get(signature_key, "")
-        if prior_code:
-            message = (
-                "Blocked unchanged video_analyze retry after non-retryable error "
-                f"{prior_code}."
-            )
-            session._halt_tool_loop(
-                "video_analyze", args, "repeated_non_retryable_tool_call", message, 2
-            )
-            return json.dumps({
-                "error": {
-                    "code": "repeated_non_retryable_tool_call",
-                    "message": message,
-                    "retryable": False,
-                },
-            }, ensure_ascii=False, separators=(",", ":"))
         reference_id = str(args.get("video_url") or "").strip()
         if not reference_id.startswith(("asset_", "output_")):
             result: Any = media_reference_error(
@@ -411,10 +391,6 @@ def invoke_video_analyze(session: Any, args: dict[str, Any], next_call: Any) -> 
                         args.get("include_transcript") is True,
                     )
                 )
-        code = _native_non_retryable_failure_code(result)
-        if code:
-            with session.lock:
-                session.native_non_retryable_failures[signature_key] = code
         return result
 
 
@@ -505,20 +481,3 @@ def _validate_evidence_blob(blob: dict[str, Any]) -> int:
     if not data or hashlib.sha256(data).hexdigest() != digest:
         raise ValueError("video evidence blob digest is invalid")
     return len(data)
-
-
-def _native_non_retryable_failure_code(result: Any) -> str:
-    payload = result
-    if isinstance(result, str):
-        try:
-            payload = json.loads(result)
-        except (TypeError, ValueError):
-            return ""
-    if not isinstance(payload, dict):
-        return ""
-    error = payload.get("error")
-    if isinstance(error, dict) and error.get("retryable") is False:
-        return str(error.get("code") or "native_tool_failed")
-    if payload.get("success") is False and payload.get("retryable") is False:
-        return str(payload.get("error_code") or "native_tool_failed")
-    return ""

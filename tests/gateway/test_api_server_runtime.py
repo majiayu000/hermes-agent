@@ -593,17 +593,9 @@ def test_runtime_video_tool_blocks_changed_retry_after_terminal_failure(tmp_path
             tool_call_id="video_third",
             next_call=lambda _args: pytest.fail("invalid source reached video tool"),
         )
-        assert json.loads(unchanged)["error"] == {
-            "code": "repeated_non_retryable_tool_call",
-            "message": (
-                "Blocked unchanged video_analyze retry after non-retryable error "
-                "video_analysis_scope_denied."
-            ),
-            "retryable": False,
-        }
-        assert len(halt_decisions) == 1
-        assert halt_decisions[0].code == "repeated_non_retryable_tool_call"
-        assert halt_decisions[0].should_halt is True
+        assert json.loads(unchanged)["error"]["code"] == "video_analysis_scope_denied"
+        assert json.loads(unchanged)["error"]["provider_submission_started"] is False
+        assert halt_decisions == []
     finally:
         runtime_module._SESSIONS.pop("agent_video_terminal", None)
         session.loop.close()
@@ -827,9 +819,7 @@ def test_runtime_tool_middleware_fails_closed_for_process_global_tools():
             ),
             "retryable": False,
         }
-        assert len(halt_decisions) == 1
-        assert halt_decisions[0].should_halt is True
-        assert halt_decisions[0].code == "runtime_tool_scope_violation"
+        assert halt_decisions == []
     finally:
         runtime_module._SESSIONS.pop("agent_scoped", None)
         session.loop.close()
@@ -1749,55 +1739,26 @@ async def test_runtime_driver_reports_skill_failure_without_result_content():
 
 
 @pytest.mark.asyncio
-async def test_runtime_bridge_blocks_unchanged_non_retryable_tool_retry():
+async def test_runtime_bridge_returns_errors_without_controlling_agent_recovery():
     queue = asyncio.Queue()
-    session = RuntimeBridgeSession(
-        "run_guard",
-        asyncio.get_running_loop(),
-        queue,
-        [{"name": "ultra_prompt_compile", "input_schema": {"type": "object"}}],
-        10_000,
-        "agent_guard",
-        _runtime_call_db("agent_guard", ("call_first", "ultra_prompt_compile")),
-    )
+    tool = "platform.example"
+    calls = [(f"call_{index}", tool) for index in range(4)]
+    session = RuntimeBridgeSession("run_recovery", asyncio.get_running_loop(), queue,
+        [{"name": tool, "input_schema": {"type": "object"}}], 10_000,
+        "agent_recovery", _runtime_call_db("agent_recovery", *calls))
     decisions = []
-    session.agent_ref[0] = SimpleNamespace(
-        _set_tool_guardrail_halt=decisions.append,
-    )
-    args = {"capability": "media.video.generate", "spec": {"intent": "ad"}}
-    first = asyncio.create_task(asyncio.to_thread(
-        session.invoke_platform_tool,
-        "ultra_prompt_compile",
-        args,
-        "call_first",
-    ))
-    request = await queue.get()
-    assert request["type"] == "tool_request"
-    assert session.submit_result({
-        "call_id": "call_first",
-        "ok": False,
-        "error": {
-            "code": "invalid_tool_arguments",
-            "message": "spec.prompt is required",
-            "retryable": False,
-        },
-    })
-    first_result = json.loads(await first)
-    assert first_result["error"]["code"] == "invalid_tool_arguments"
-    assert first_result["error"]["recovery"] == {
-        "action": "correct_arguments",
-        "same_arguments_allowed": False,
-    }
+    session.agent_ref[0] = SimpleNamespace(_set_tool_guardrail_halt=decisions.append)
+    for index, args in enumerate([{}, {}, {"duration": 6}, {"duration": 5}]):
+        call = asyncio.create_task(asyncio.to_thread(session.invoke_platform_tool, tool, args, f"call_{index}"))
+        request = await asyncio.wait_for(queue.get(), 2)
+        assert request["type"] == "tool_request"
+        error = {"code": "invalid_tool_arguments" if index < 2 else "provider_unavailable", "message": "exact cause", "retryable": False}
+        response = {"call_id": f"call_{index}", "ok": index == 3}
+        response.update({"result": {"done": True}} if index == 3 else {"error": error})
+        assert session.submit_result(response)
+        result = json.loads(await call)
+        assert result == ({"done": True} if index == 3 else {"error": error})
     assert decisions == []
-
-    second_result = json.loads(session.invoke_platform_tool(
-        "ultra_prompt_compile",
-        args,
-        "call_second",
-    ))
-    assert second_result["error"]["code"] == "repeated_non_retryable_tool_call"
-    assert decisions[0].code == "repeated_non_retryable_tool_call"
-    assert queue.empty()
 
 
 @pytest.mark.asyncio
@@ -1842,7 +1803,7 @@ async def test_runtime_media_requires_exact_private_contract_before_submission(t
         },
     })
     result = json.loads(await call)
-    assert result["error"]["code"] == "model_schema_unavailable"
+    assert result["error"]["code"] == "model_not_found"
     assert result["error"]["retryable"] is False
     assert queue.empty()
 
@@ -1899,37 +1860,12 @@ async def test_runtime_media_presents_new_model_contract_before_paid_submission(
         },
     })
 
-    result = json.loads(await call)
-    assert result["error"] == {
-        "code": "model_schema_required",
-        "message": (
-            "Exact model parameters are now available. Reconcile every explicit "
-            "workflow value with the provider defaults before retrying; prompt prose "
-            "does not override omitted literal parameters."
-        ),
-        "retryable": True,
-    }
-    assert result["recovery"] == {"action": "reconcile_model_parameters"}
-    assert result["model_contracts"] == [{
-        "model": model,
-        "parameters": [
-            {
-                "name": "duration",
-                "type": "integer",
-                "required": False,
-                "default": 5,
-                "options": [5, 15],
-                "description": "Video duration in seconds.",
-            },
-            {
-                "name": "prompt",
-                "type": "string",
-                "required": False,
-                "options": [],
-                "description": "",
-            },
-        ],
-    }]
+    original = await asyncio.wait_for(queue.get(), 2)
+    assert original["type"] == "tool_request"
+    assert original["payload"]["call_id"] == "call_generate"
+    assert "duration" not in original["payload"]["arguments"]["requests"][0]
+    assert session.submit_result({"call_id": "call_generate", "ok": True, "result": {"delivery_status": "ready"}})
+    assert json.loads(await call) == {"delivery_status": "ready"}
     assert queue.empty()
 
     generated = asyncio.create_task(asyncio.to_thread(
@@ -2009,7 +1945,7 @@ async def test_runtime_media_uses_private_contract_and_rejects_domain_ratio_fiel
         },
     })
     preflight = json.loads(await preflight_call)
-    assert preflight["error"]["code"] == "model_schema_required"
+    assert preflight["error"]["code"] == "invalid_tool_arguments"
     assert queue.empty()
 
     invalid_call = asyncio.create_task(asyncio.to_thread(
@@ -2083,8 +2019,11 @@ async def test_runtime_media_treats_platform_moodboard_as_required_provider_imag
             ],
         },
     })
-    preflight = json.loads(await preflight_call)
-    assert preflight["error"]["code"] == "model_schema_required"
+    original = await asyncio.wait_for(queue.get(), 2)
+    assert original["type"] == "tool_request"
+    assert original["payload"]["arguments"] == args
+    assert session.submit_result({"call_id": "call_preflight_edit", "ok": True, "result": {"delivery_status": "ready"}})
+    assert json.loads(await preflight_call) == {"delivery_status": "ready"}
     assert queue.empty()
 
     generated = asyncio.create_task(asyncio.to_thread(
@@ -2151,7 +2090,7 @@ async def test_runtime_media_rejects_moodboard_for_text_to_image_model_locally()
     })
 
     preflight = json.loads(await preflight_call)
-    assert preflight["error"]["code"] == "model_schema_required"
+    assert preflight["error"]["code"] == "invalid_tool_arguments"
     assert queue.empty()
 
     pending = asyncio.create_task(asyncio.to_thread(
@@ -2163,10 +2102,7 @@ async def test_runtime_media_rejects_moodboard_for_text_to_image_model_locally()
     rejected = json.loads(await pending)
     assert rejected["error"]["code"] == "invalid_tool_arguments"
     assert "cannot accept the supplied platform media roles: moodboard" in rejected["error"]["message"]
-    assert rejected["error"]["recovery"] == {
-        "action": "correct_arguments",
-        "same_arguments_allowed": False,
-    }
+    assert "recovery" not in rejected["error"]
     assert queue.empty()
 
 
@@ -2216,7 +2152,7 @@ async def test_runtime_media_rejects_provider_images_field_and_preserves_platfor
     })
 
     preflight = json.loads(await preflight_call)
-    assert preflight["error"]["code"] == "model_schema_required"
+    assert preflight["error"]["code"] == "invalid_tool_arguments"
     assert queue.empty()
 
     pending = asyncio.create_task(asyncio.to_thread(
@@ -2276,7 +2212,8 @@ async def test_runtime_bridge_allows_distinct_argument_corrections_until_success
             },
         },
     )
-    assert first["error"]["recovery"]["action"] == "correct_arguments"
+    assert first["error"]["message"] == "options[0].value is required"
+    assert "recovery" not in first["error"]
 
     still_invalid = await invoke(
         "call_still_invalid",
@@ -2291,10 +2228,7 @@ async def test_runtime_bridge_allows_distinct_argument_corrections_until_success
         },
     )
     assert still_invalid["error"]["code"] == "invalid_tool_arguments"
-    assert still_invalid["error"]["recovery"] == {
-        "action": "correct_arguments",
-        "same_arguments_allowed": False,
-    }
+    assert "recovery" not in still_invalid["error"]
 
     completed = await invoke(
         "call_valid",
@@ -2386,47 +2320,10 @@ async def test_runtime_bridge_preserves_safe_failed_result_with_typed_error():
 
 
 @pytest.mark.parametrize("transport", [
-    {
-        "ok": False,
-        "error": {
-            "code": "unsupported_aspect_ratio",
-            "message": "unsupported",
-            "retryable": False,
-            "private_upstream_detail": "must-not-cross",
-        },
-    },
-    {
-        "ok": False,
-        "result": {"allowed": {"credential": "must-not-cross"}},
-        "error": {
-            "code": "unsupported_aspect_ratio",
-            "message": "unsupported",
-            "retryable": False,
-        },
-    },
-    {
-        "ok": False,
-        "result": {"allowed": {"durations": [{"secret": "must-not-cross"}]}},
-        "error": {
-            "code": "unsupported_duration",
-            "message": "unsupported",
-            "retryable": False,
-        },
-    },
-    {
-        "ok": False,
-        "error": {
-            "code": "unsupported_aspect_ratio",
-            "message": "unsupported",
-        },
-    },
-    {
-        "error": {
-            "code": "unsupported_aspect_ratio",
-            "message": "unsupported",
-            "retryable": False,
-        },
-    },
+    {"ok": False},
+    {"ok": False, "error": {"code": "bad", "message": 3}},
+    {"ok": False, "error": {"code": "bad", "message": "bad", "retryable": "yes"}},
+    {"error": {"code": "bad", "message": "bad"}},
 ])
 def test_failed_tool_result_projection_fails_closed(transport):
     projected = _failed_tool_result_projection(transport)
@@ -2464,23 +2361,12 @@ def test_failed_tool_result_projection_preserves_platform_diagnostics():
     }
 
 
-def test_failed_tool_result_projection_bounds_oversized_message_without_losing_code():
-    projected = _failed_tool_result_projection({
-        "ok": False,
-        "error": {
-            "code": "invalid_tool_arguments",
-            "message": "private-schema-detail" * 200,
-            "retryable": False,
-        },
-    })
-    assert projected == {
-        "error": {
-            "code": "invalid_tool_arguments",
-            "message": "platform tool failed with invalid_tool_arguments",
-            "retryable": False,
-        },
-    }
-    assert "private-schema-detail" not in json.dumps(projected)
+def test_failed_tool_result_projection_preserves_complete_business_details():
+    error = {"code": "supplier_rejected", "message": "complete-detail" * 500,
+             "details": {"field": "duration", "allowed": [5.5], "submission_started": False}}
+    result = {"jobs": [{"job_id": "original_job", "error": error}],
+              "output_ref": {"ref": "toolout_original", "size_bytes": 90000}}
+    assert _failed_tool_result_projection({"ok": False, "error": error, "result": result}) == {"error": error, "result": result}
 
 
 @pytest.mark.asyncio
@@ -2515,8 +2401,7 @@ async def test_runtime_bridge_preserves_terminal_platform_error_code():
     })
     result = json.loads(await call)
     assert result["error"]["code"] == "tool_not_implemented"
-    assert decisions[0].code == "tool_not_implemented"
-    assert decisions[0].count == 1
+    assert decisions == []
 
 
 def test_runtime_bridge_deadline_attribute_tracks_request():

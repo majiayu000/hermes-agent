@@ -280,7 +280,7 @@
   "x-ultra-contract": {
     "name": "ultra.runtime.run-request",
     "major": 1,
-    "minor": 5,
+    "minor": 6,
     "features": [
       "invoked_skills.v1",
       "llm_egress.v1",

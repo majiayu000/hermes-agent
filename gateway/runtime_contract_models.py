@@ -153,11 +153,27 @@ class RuntimeToolRequest(_StrictModel):
     skills: Annotated[list[RuntimeToolSkill], Field(max_length=128)]
 
 
+class RuntimeToolError(BaseModel):
+    """Authorized Tool diagnostics; business extensions are preserved."""
+
+    model_config = ConfigDict(extra="allow", strict=True)
+    code: Annotated[str, StringConstraints(min_length=1)]
+    message: Annotated[str, StringConstraints(min_length=1)]
+    retryable: bool | None = None
+
+    @field_validator("retryable", mode="before")
+    @classmethod
+    def require_boolean_when_present(cls, value: object) -> object:
+        if not isinstance(value, bool):
+            raise ValueError("retryable must be a boolean when supplied")
+        return value
+
+
 class RuntimeToolResult(_StrictModel):
     call_id: NonEmpty512
     ok: bool
     result: JsonValue | None = None
-    error: RuntimeError | None = None
+    error: RuntimeToolError | None = None
 
     @model_validator(mode="after")
     def require_failed_error(self) -> "RuntimeToolResult":

@@ -183,3 +183,14 @@ def test_runtime_event_encoder_reuses_strict_decoder():
     }
     with pytest.raises(ValidationError):
         encode_runtime_event({"type": "future_frame", "payload": {}})
+
+
+def test_tool_error_preserves_business_extensions_and_optional_advice():
+    payload = {"call_id": "call_fixture", "ok": False, "error": {
+        "code": "upstream.failure", "message": "detail" * 500,
+        "provider": {"code": 1012009, "submission_status": "failed"},
+    }}
+    decoded = decode_runtime_tool_result(payload)
+    assert decoded.error.model_dump(exclude_unset=True) == payload["error"]
+    with pytest.raises(ValidationError):
+        decode_runtime_tool_result({**payload, "error": {**payload["error"], "retryable": None}})
