@@ -28,6 +28,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from agent.codex_responses_adapter import _summarize_user_message_for_log
+from agent.conversation_recovery import prepare_tool_call_retry
 from agent.conversation_compression import conversation_history_after_compression
 from agent.display import KawaiiSpinner
 from agent.error_classifier import FailoverReason, classify_api_error
@@ -1832,35 +1833,7 @@ def run_conversation(
                             )
                             if truncated_tool_call_retries < 3:
                                 truncated_tool_call_retries += 1
-                                if _is_stub_stall:
-                                    # The stream broke mid tool-call (network /
-                                    # peer-closed connection), not a real output
-                                    # cap — say so instead of "max output tokens".
-                                    agent._buffer_vprint(
-                                        f"⚠️  Stream interrupted mid tool-call — "
-                                        f"retrying ({truncated_tool_call_retries}/3)..."
-                                    )
-                                else:
-                                    agent._buffer_vprint(
-                                        f"⚠️  Truncated tool call detected — "
-                                        f"retrying API call "
-                                        f"({truncated_tool_call_retries}/3)..."
-                                    )
-                                # Boost max_tokens on each retry so the model has
-                                # more room to complete the tool-call JSON. A
-                                # network stall doesn't need a bigger budget, but
-                                # a genuine output-cap truncation does, and the
-                                # boost is harmless for the stall case.
-                                _tc_boost_base = agent.max_tokens if agent.max_tokens else 4096
-                                _tc_boost = _tc_boost_base * (truncated_tool_call_retries + 1)
-                                _tc_requested_cap = agent._requested_output_cap_from_api_kwargs(api_kwargs)
-                                if _tc_requested_cap is not None:
-                                    _tc_boost = max(_tc_boost, _tc_requested_cap)
-                                _tc_boost_cap = max(32768, _tc_requested_cap or 0)
-                                agent._ephemeral_max_output_tokens = min(_tc_boost, _tc_boost_cap)
-                                # Don't append the broken response to messages;
-                                # just re-run the same API call from the current
-                                # message state, giving the model another chance.
+                                prepare_tool_call_retry(agent, response, _trunc_msg, api_kwargs, truncated_tool_call_retries, messages, api_messages)
                                 continue
                             agent._flush_status_buffer()
                             if _is_stub_stall:
@@ -2376,7 +2349,7 @@ def run_conversation(
                 classified = classify_api_error(
                     api_error,
                     provider=getattr(agent, "provider", "") or "",
-                    model=getattr(agent, "model", "") or "",
+                    model=getattr(agent, "model", "") or "", managed_egress=getattr(agent, "_run_llm_egress", False) is True,
                     approx_tokens=approx_tokens,
                     context_length=_ctx_len,
                     num_messages=len(api_messages) if api_messages else 0,
@@ -3417,18 +3390,14 @@ def run_conversation(
                 ) and not is_context_length_error
 
                 if is_client_error:
-                    # Try fallback before aborting — a different provider may
-                    # not have the same issue (rate limit, auth, etc.). Only
-                    # announce the attempt when a fallback chain actually
-                    # exists; otherwise "trying fallback..." is a lie and the
-                    # session looks like it's recovering when it's about to
-                    # abort silently (#35314, #17446).
-                    if agent._has_pending_fallback():
+                    # Honor the classifier's fallback decision, including
+                    # the prohibition on resubmitting paid egress operations.
+                    if classified.should_fallback and agent._has_pending_fallback():
                         if classified.reason == FailoverReason.content_policy_blocked:
                             agent._buffer_status("⚠️ Provider safety filter blocked this request — trying fallback...")
                         else:
                             agent._buffer_status(f"⚠️ Non-retryable error (HTTP {status_code}) — trying fallback...")
-                    if agent._try_activate_fallback():
+                    if classified.should_fallback and agent._try_activate_fallback():
                         active_system_prompt = _sync_failover_system_message(
                             agent, api_messages, active_system_prompt)
                         retry_count = 0

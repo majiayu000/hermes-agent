@@ -238,11 +238,11 @@ class TestErrorClassifierBedrock:
     """Verify Bedrock error patterns are in the global error classifier."""
 
     def test_throttling_in_rate_limit_patterns(self):
-        from agent.error_classifier import _RATE_LIMIT_PATTERNS
+        from agent.error_patterns import _RATE_LIMIT_PATTERNS
         assert "throttlingexception" in _RATE_LIMIT_PATTERNS
 
     def test_context_overflow_patterns(self):
-        from agent.error_classifier import _CONTEXT_OVERFLOW_PATTERNS
+        from agent.error_patterns import _CONTEXT_OVERFLOW_PATTERNS
         assert "input is too long" in _CONTEXT_OVERFLOW_PATTERNS
 
 

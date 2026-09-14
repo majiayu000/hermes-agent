@@ -90,6 +90,12 @@ _SAFE_ERROR_MESSAGES = {
     "content_policy_blocked": "The request could not be completed because of a content policy.",
     "insufficient_credits": "The current Account does not have enough credit for this request.",
     "model_incompatible": "The selected model could not accept the generated result.",
+    "egress_request_replayed": (
+        "The model operation was already reserved or submitted. Its result could not be recovered; no duplicate was submitted."
+    ),
+    "egress_result_unknown": (
+        "The model operation may have been submitted, but its complete result is unavailable. Automatic resubmission was stopped."
+    ),
     "provider_empty_stream": "The creation service returned no output.",
     "provider_timeout": "The creation service timed out.",
     "provider_unavailable": "The creation service is temporarily unavailable.",

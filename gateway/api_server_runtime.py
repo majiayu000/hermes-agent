@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from gateway.runtime_egress import _runtime_llm_egress, _runtime_vision_llm_egress, _configure_run_llm_egress
+
 import asyncio
 import hashlib
 import json
@@ -18,6 +20,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from gateway.runtime_failures import _runtime_failure_code
 from gateway.runtime_skill_projection import (
     RuntimeSkillProjection,
     resolve_skill_projections,
@@ -141,100 +144,13 @@ _UNBOUNDED_TOOL_WAIT_CAP_SECONDS = 3600.0
 _SESSION_SWEEP_INTERVAL_SECONDS = 60.0
 _FINISHED_SESSION_TTL_SECONDS = 120.0
 
-_FAILURE_REASON_CODES = {
-    "billing": "insufficient_credits",
-    "content_policy_blocked": "content_policy_blocked",
-    "format_error": "model_incompatible",
-    "multimodal_tool_content_unsupported": "model_incompatible",
-    "timeout": "provider_timeout",
-    "overloaded": "provider_unavailable",
-    "rate_limit": "provider_unavailable",
-    "run_budget_exhausted": "run_budget_exhausted",
-    "server_error": "provider_unavailable",
-}
-
-def _runtime_failure_code(result: Any) -> str:
-    if not isinstance(result, dict):
-        return "runtime_unavailable"
-    if result.get("turn_exit_reason") in {
-        "empty_response_exhausted",
-        "all_retries_exhausted_no_response",
-    }:
-        return "provider_empty_stream"
-    reason = str(result.get("failure_reason") or "").strip().lower()
-    if reason in _FAILURE_REASON_CODES:
-        return _FAILURE_REASON_CODES[reason]
-    error = str(result.get("error") or "").strip().lower()
-    if "insufficient balance" in error or "insufficient credit" in error or "http 402" in error:
-        return "insufficient_credits"
-    if error.startswith("content_policy_blocked:"):
-        return "content_policy_blocked"
-    return "runtime_unavailable"
 
 
-def _runtime_llm_egress(value: Any, *, required: bool) -> dict[str, str] | None:
-    if value is None and not required:
-        return None
-    if not isinstance(value, dict) or set(value) != {"base_url", "grant", "expires_at"}:
-        raise ValueError("llm_egress must contain base_url, grant, and expires_at")
-    base_url = str(value.get("base_url") or "").strip().rstrip("/")
-    grant = str(value.get("grant") or "").strip()
-    expires_at = str(value.get("expires_at") or "").strip()
-    parsed = urlparse(base_url)
-    if (
-        parsed.scheme not in {"http", "https"}
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-        or parsed.path != "/internal/llm/v1"
-    ):
-        raise ValueError("llm_egress.base_url is invalid")
-    if not re.fullmatch(r"ueg_[A-Za-z0-9_-]{43}", grant):
-        raise ValueError("llm_egress.grant is invalid")
-    try:
-        expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise ValueError("llm_egress.expires_at is invalid") from exc
-    if expiry.tzinfo is None or expiry.astimezone(timezone.utc) <= datetime.now(timezone.utc):
-        raise ValueError("llm_egress grant is expired")
-    return {"base_url": base_url, "grant": grant, "expires_at": expires_at}
 
 
-def _runtime_vision_llm_egress(value: Any) -> dict[str, str] | None:
-    if value is None:
-        return None
-    if not isinstance(value, dict) or set(value) != {
-        "model", "base_url", "grant", "expires_at",
-    }:
-        raise ValueError(
-            "vision_llm_egress must contain model, base_url, grant, and expires_at"
-        )
-    model = str(value.get("model") or "").strip()
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,511}", model):
-        raise ValueError("vision_llm_egress.model is invalid")
-    capability = _runtime_llm_egress(
-        {key: value[key] for key in ("base_url", "grant", "expires_at")},
-        required=True,
-    )
-    return {"model": model, **capability}
 
 
-def _configure_run_llm_egress(agent: Any, capability: dict[str, str] | None, model: Any) -> None:
-    if capability is None:
-        return
-    requested_model = str(model or "").strip()
-    if not requested_model:
-        raise ValueError("model is required")
-    if (
-        str(getattr(agent, "model", "") or "").strip() != requested_model
-        or str(getattr(agent, "provider", "") or "").strip() != "custom"
-        or str(getattr(agent, "api_key", "") or "") != capability["grant"]
-        or str(getattr(agent, "base_url", "") or "").rstrip("/")
-        != capability["base_url"]
-    ):
-        raise ValueError("agent run-scoped LLM egress configuration is inconsistent")
+
 
 _RUNTIME_GATE_LOCK = threading.Lock()
 _RUNTIME_EXECUTOR: ThreadPoolExecutor | None = None

@@ -101,9 +101,11 @@ class _OpenAIProxy:
 
 OpenAI = _OpenAIProxy()  # module-level name, resolves lazily on call/isinstance
 
+from agent.auxiliary_requests import (
+    _openai_http_client_kwargs, invoke_auxiliary_request, invoke_async_auxiliary_request,
+)
 from agent.credential_pool import load_pool
 from agent.model_metadata import MINIMUM_CONTEXT_LENGTH, get_model_context_length
-from agent.process_bootstrap import build_keepalive_http_client
 from hermes_cli.config import get_hermes_home
 from hermes_constants import OPENROUTER_BASE_URL
 from utils import base_url_host_matches, base_url_hostname, env_float, model_forces_max_completion_tokens, normalize_proxy_env_vars
@@ -111,16 +113,6 @@ from utils import base_url_host_matches, base_url_hostname, env_float, model_for
 logger = logging.getLogger(__name__)
 
 
-def _openai_http_client_kwargs(
-    base_url: Optional[str],
-    *,
-    async_mode: bool = False,
-) -> Dict[str, Any]:
-    """Inject keepalive httpx client with env-only proxy (not macOS system proxy)."""
-    client = build_keepalive_http_client(str(base_url or ""), async_mode=async_mode)
-    if client is None:
-        return {}
-    return {"http_client": client}
 
 
 def _create_openai_client(*, api_key: str, base_url: str, **kwargs: Any) -> Any:
@@ -5834,28 +5826,14 @@ def call_llm(
     # Handle unsupported temperature, max_tokens vs max_completion_tokens retry,
     # then payment fallback.
     try:
-        # Retry ONCE on the same provider for a one-off transient transport
-        # blip (streaming-close / incomplete chunked read / 5xx / 408) before
-        # the except-chain below escalates to provider/model fallback. A
-        # single dropped connection shouldn't abandon an otherwise-healthy
-        # provider. A second failure (or any non-transient error) falls
-        # through to ``first_err`` and the existing fallback handling
-        # unchanged. This is the unified home for the transient retry that
-        # every auxiliary task (compression, memory flush, title-gen,
-        # session-search, vision) shares. (PR #16587)
-        try:
-            return _validate_llm_response(
-                client.chat.completions.create(**kwargs), task)
-        except Exception as transient_err:
-            if not _is_transient_transport_error(transient_err):
-                raise
-            logger.info(
-                "Auxiliary %s: transient transport error; retrying once on "
-                "the same provider before fallback: %s",
-                task or "call", transient_err,
-            )
-            return _validate_llm_response(
-                client.chat.completions.create(**kwargs), task)
+        # Only direct-provider calls may use this transport retry. Managed
+        # egress can already have submitted the paid operation on disconnect.
+        return _validate_llm_response(
+            invoke_auxiliary_request(
+                lambda: client.chat.completions.create(**kwargs),
+                task=task, is_transient=_is_transient_transport_error,
+                allow_retry=run_scoped_capability is None,
+            ), task)
     except Exception as first_err:
         if "temperature" in kwargs and _is_unsupported_temperature_error(first_err):
             retry_kwargs = dict(kwargs)
@@ -6386,22 +6364,13 @@ async def async_call_llm(
         kwargs["messages"] = _convert_openai_images_to_anthropic(kwargs["messages"])
 
     try:
-        # Retry ONCE on the same provider for a transient transport blip
-        # before the except-chain escalates to fallback — see call_llm()
-        # for the rationale. (PR #16587)
-        try:
-            return _validate_llm_response(
-                await client.chat.completions.create(**kwargs), task)
-        except Exception as transient_err:
-            if not _is_transient_transport_error(transient_err):
-                raise
-            logger.info(
-                "Auxiliary %s (async): transient transport error; retrying "
-                "once on the same provider before fallback: %s",
-                task or "call", transient_err,
-            )
-            return _validate_llm_response(
-                await client.chat.completions.create(**kwargs), task)
+        # Managed egress must not replay an uncertain paid submission.
+        return _validate_llm_response(
+            await invoke_async_auxiliary_request(
+                lambda: client.chat.completions.create(**kwargs),
+                task=task, is_transient=_is_transient_transport_error,
+                allow_retry=run_scoped_capability is None,
+            ), task)
     except Exception as first_err:
         if "temperature" in kwargs and _is_unsupported_temperature_error(first_err):
             retry_kwargs = dict(kwargs)
