@@ -196,3 +196,54 @@ def test_late_error_after_cleanup_is_harmless(observer):
     plugin.on_api_request_error(**ids, error={"type": "LateError"})
     plugin.on_session_end(**ids, completed=False)
     assert not plugin._TRACE_STATE
+
+
+def test_usage_export_matches_provider_response_and_summary(monkeypatch):
+    from decimal import Decimal
+    from types import SimpleNamespace
+    from agent import usage_pricing
+    from plugins.observability.langfuse.usage import _usage_and_cost, _summary_usage_and_cost
+
+    canonical = usage_pricing.CanonicalUsage(
+        input_tokens=100, output_tokens=20, cache_read_tokens=30,
+        cache_write_tokens=40, reasoning_tokens=5,
+    )
+    entry = usage_pricing.PricingEntry(
+        input_cost_per_million=Decimal('2'), output_cost_per_million=Decimal('4'),
+        cache_read_cost_per_million=Decimal('1'), cache_write_cost_per_million=Decimal('3'),
+    )
+    monkeypatch.setattr(usage_pricing, 'normalize_usage', lambda *a, **k: canonical)
+    monkeypatch.setattr(usage_pricing, 'get_pricing_entry', lambda *a, **k: entry)
+
+    def estimate(*args, **kwargs):
+        assert kwargs['api_key'] == ''
+        return SimpleNamespace(amount_usd=Decimal('0.00043'))
+
+    monkeypatch.setattr(usage_pricing, 'estimate_usage_cost', estimate)
+    route = dict(provider='test-provider', model='test-model', base_url='http://invalid.test')
+    response_result = _usage_and_cost(SimpleNamespace(usage={'test': True}), api_mode='chat_completions', **route)
+    summary_result = _summary_usage_and_cost(vars(canonical), **route)
+    expected_usage = {'input': 100, 'output': 20, 'cache_read_input_tokens': 30,
+                      'cache_creation_input_tokens': 40, 'reasoning_tokens': 5}
+    assert response_result == summary_result
+    assert response_result[0] == expected_usage
+    assert sum(response_result[1].values()) == pytest.approx(0.00043)
+    monkeypatch.setattr(usage_pricing, 'get_pricing_entry', lambda *a, **k: None)
+    assert _summary_usage_and_cost(vars(canonical), **route)[1] == {'total': 0.00043}
+    assert _usage_and_cost(SimpleNamespace(usage={'test': True}), api_mode='chat_completions', **route)[1] == {'total': 0.00043}
+    assert _usage_and_cost(SimpleNamespace(), api_mode='chat_completions', **route) == ({}, {})
+
+
+def test_read_file_trace_preview_is_bounded_and_redacted():
+    from plugins.observability.langfuse.payloads import _safe_value, _normalize_read_file_payload
+    raw = {'content': '\n'.join(f'{i}|line {i}' for i in range(1, 81)),
+           'total_lines': 80, 'file_size': 1000, 'is_binary': False, 'is_image': False,
+           'base64_content': 'AAAA'}
+    result = _safe_value(_normalize_read_file_payload(raw, args={'path': '/tmp/example', 'offset': 1, 'limit': 80}))
+    assert result['returned_lines'] == {'start': 1, 'end': 80, 'count': 80}
+    assert result['content_preview']['omitted_line_count'] == 40
+    assert result['base64_content'] == {'omitted': True, 'length': 4}
+    assert result['path'] == '/tmp/example'
+    nested = _safe_value('{"data":{"api_key":"test-secret"}} [Hint: retry]', parse_json_strings=True)
+    assert nested['data']['api_key'] == '<redacted>'
+    assert nested['_hint'] == '[Hint: retry]'
