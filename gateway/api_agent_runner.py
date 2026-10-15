@@ -38,9 +38,11 @@ def run_agent_sync(
     agent_configurator: Any = None,
     agent_creation_overrides: dict[str, Any] | None = None,
     runtime_message_id: str | None = None,
+    runtime_run_id: str = "",
     runtime_auxiliary_egress: dict[str, dict[str, str]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, int]]:
     from gateway.session_context import clear_session_vars, set_session_vars
+    from hermes_cli.middleware import observer_run_id
 
     scope = dict(principal_scope or {})
     if has_principal_scope(scope) and session_id:
@@ -80,6 +82,7 @@ def run_agent_sync(
         )
     approval_token = None
     runtime_auxiliary_token = None
+    observer_token = observer_run_id.set(runtime_run_id)
     prompt_callbacks_enabled = bool(prompt_session_key and prompt_notify_callback)
 
     def _prompt(kind: str, payload: dict[str, Any], *, timeout: float) -> str:
@@ -189,6 +192,7 @@ def run_agent_sync(
                 issue_or_refresh_sandbox_lease(db, effective_session_id, scope)
         return result, usage
     finally:
+        observer_run_id.reset(observer_token)
         if runtime_auxiliary_token is not None:
             from agent.run_scoped_auxiliary import reset_run_scoped_auxiliary
 

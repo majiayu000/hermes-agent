@@ -1,31 +1,9 @@
-"""langfuse — Hermes plugin for Langfuse observability.
-
-Traces Hermes conversations, LLM calls, and tool usage to Langfuse.
-
-Activation is handled by the Hermes plugin system — standalone plugins only
-load when listed in ``plugins.enabled`` (via ``hermes plugins enable
-observability/langfuse`` or ``hermes tools → Langfuse Observability``). At
-runtime the plugin also requires the ``langfuse`` SDK and credentials; if
-either is missing the hooks are inert.
-
-Required env vars (set via ``hermes tools`` or ~/.hermes/.env):
-  HERMES_LANGFUSE_PUBLIC_KEY  - Langfuse project public key (pk-lf-...)
-  HERMES_LANGFUSE_SECRET_KEY  - Langfuse project secret key (sk-lf-...)
-  HERMES_LANGFUSE_BASE_URL    - Langfuse server URL (default: https://cloud.langfuse.com)
-
-Optional env vars:
-  HERMES_LANGFUSE_ENV         - environment tag (e.g. "production", "local")
-  HERMES_LANGFUSE_RELEASE     - release/version tag
-  HERMES_LANGFUSE_SAMPLE_RATE - sampling rate 0.0–1.0 (default: 1.0)
-  HERMES_LANGFUSE_MAX_CHARS   - max chars per field (default: 12000)
-  HERMES_LANGFUSE_DEBUG       - set to "true" for verbose logging
-"""
+"""Opt-in Hermes Langfuse observer. See README.md for setup and configuration."""
 from __future__ import annotations
 
 import json
 import logging
 import os
-import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -45,6 +23,7 @@ class TraceState:
     trace_id: str
     root_ctx: Any
     root_span: Any
+    run_id: str = ""
     generations: Dict[str, Any] = field(default_factory=dict)
     tools: Dict[str, Any] = field(default_factory=dict)
     pending_tools_by_name: Dict[str, list] = field(default_factory=dict)
@@ -64,9 +43,6 @@ _TRACE_STATE: Dict[str, TraceState] = {}
 # to bound the leak from non-finalizing turns, not to limit concurrency.
 _MAX_TRACE_STATE = 256
 _LANGFUSE_CLIENT = None
-_READ_FILE_LINE_RE = re.compile(r"^\s*(\d+)\|(.*)$")
-_READ_FILE_HEAD_LINES = 25
-_READ_FILE_TAIL_LINES = 15
 
 # Langfuse-issued keys always carry these prefixes (cloud or self-hosted —
 # the prefix is baked into the server-side issuance flow, not a UI hint).
@@ -265,345 +241,32 @@ def _trace_key(
     return _scope_prefix(task_id, session_id)
 
 
-def _is_base64_data_uri(value: str) -> bool:
-    prefix = value[:200].lower()
-    return prefix.startswith("data:") and ";base64," in prefix
+from .payloads import (
+    _is_base64_data_uri,
+    _redact_data_uri,
+    _truncate_text,
+    _maybe_parse_json_string,
+    _looks_like_read_file_payload,
+    _parse_read_file_lines,
+    _build_read_file_preview,
+    _normalize_read_file_payload,
+    _normalize_payload,
+    _safe_value,
+    _extract_last_user_message,
+    _coerce_request_messages,
+    _serialize_messages,
+    _serialize_tool_calls,
+    _serialize_assistant_message,
+)
 
 
-def _redact_data_uri(value: str) -> dict[str, Any]:
-    header = value.split(",", 1)[0] if "," in value else "data:"
-    media_type = header[5:].split(";", 1)[0] if header.startswith("data:") else ""
-    return {
-        "type": "data_uri",
-        "media_type": media_type or None,
-        "omitted": True,
-        "length": len(value),
-    }
-
-
-def _truncate_text(value: str, max_chars: int) -> Any:
-    # Langfuse SDK treats data:*;base64 strings as media and attempts to
-    # decode them. Truncating those strings produces invalid base64 and noisy
-    # "Error parsing base64 data URI" logs. Observability only needs metadata,
-    # not raw image/audio payloads, so redact the whole data URI before it
-    # reaches the SDK.
-    if _is_base64_data_uri(value):
-        return _redact_data_uri(value)
-    if len(value) <= max_chars:
-        return value
-    return value[:max_chars] + f"... [truncated {len(value) - max_chars} chars]"
-
-
-def _maybe_parse_json_string(value: str) -> Any:
-    stripped = value.strip()
-    if len(stripped) < 2 or stripped[0] not in "{[" or stripped[-1] not in "}]":
-        if len(stripped) < 2 or stripped[0] not in "{[":
-            return value
-    try:
-        parsed, idx = json.JSONDecoder().raw_decode(stripped)
-    except Exception:
-        return value
-    if not isinstance(parsed, (dict, list)):
-        return value
-
-    trailing = stripped[idx:].strip()
-    if not trailing:
-        return parsed
-
-    hint_key = "_hint" if trailing.startswith("[Hint:") else "_trailing_text"
-    if isinstance(parsed, dict):
-        merged = dict(parsed)
-        key = hint_key if hint_key not in merged else "_trailing_text"
-        merged[key] = trailing
-        return merged
-
-    return {"data": parsed, hint_key: trailing}
-
-
-def _looks_like_read_file_payload(value: Any) -> bool:
-    if not isinstance(value, dict):
-        return False
-    content = value.get("content")
-    return (
-        isinstance(content, str)
-        and "total_lines" in value
-        and "file_size" in value
-        and "is_binary" in value
-        and "is_image" in value
-        and not value.get("error")
-    )
-
-
-def _parse_read_file_lines(content: str) -> list[dict[str, Any]]:
-    if not isinstance(content, str) or not content:
-        return []
-
-    lines = []
-    for raw_line in content.splitlines():
-        match = _READ_FILE_LINE_RE.match(raw_line)
-        if not match:
-            return []
-        lines.append({
-            "line": int(match.group(1)),
-            "text": match.group(2),
-        })
-    return lines
-
-
-def _build_read_file_preview(lines: list[dict[str, Any]]) -> dict[str, Any]:
-    if len(lines) <= (_READ_FILE_HEAD_LINES + _READ_FILE_TAIL_LINES):
-        return {"lines": lines}
-
-    return {
-        "head": lines[:_READ_FILE_HEAD_LINES],
-        "tail": lines[-_READ_FILE_TAIL_LINES:],
-        "omitted_line_count": len(lines) - _READ_FILE_HEAD_LINES - _READ_FILE_TAIL_LINES,
-    }
-
-
-def _normalize_read_file_payload(value: dict[str, Any], *, args: Any = None) -> dict[str, Any]:
-    normalized: dict[str, Any] = {}
-    if isinstance(args, dict):
-        path = args.get("path")
-        offset = args.get("offset")
-        limit = args.get("limit")
-        if isinstance(path, str) and path:
-            normalized["path"] = path
-        if isinstance(offset, int):
-            normalized["offset"] = offset
-        if isinstance(limit, int):
-            normalized["limit"] = limit
-
-    lines = _parse_read_file_lines(value.get("content", ""))
-    if lines:
-        normalized["returned_lines"] = {
-            "start": lines[0]["line"],
-            "end": lines[-1]["line"],
-            "count": len(lines),
-        }
-        normalized["content_preview"] = _build_read_file_preview(lines)
-    elif value.get("content"):
-        normalized["content_preview"] = {
-            "text": value.get("content", ""),
-        }
-
-    for key in (
-        "total_lines",
-        "file_size",
-        "truncated",
-        "is_binary",
-        "is_image",
-        "hint",
-        "_warning",
-        "mime_type",
-        "dimensions",
-        "similar_files",
-        "error",
-    ):
-        if key in value:
-            normalized[key] = value[key]
-
-    base64_content = value.get("base64_content")
-    if isinstance(base64_content, str) and base64_content:
-        normalized["base64_content"] = {
-            "omitted": True,
-            "length": len(base64_content),
-        }
-
-    return normalized
-
-
-def _normalize_payload(value: Any, *, tool_name: str = "", args: Any = None) -> Any:
-    if _looks_like_read_file_payload(value):
-        return _normalize_read_file_payload(
-            value,
-            args=args if tool_name == "read_file" else None,
-        )
-    return value
-
-
-def _safe_value(value: Any, *, max_chars: Optional[int] = None, depth: int = 0,
-                parse_json_strings: bool = False) -> Any:
-    max_chars = max_chars if max_chars is not None else int(_env("HERMES_LANGFUSE_MAX_CHARS", "12000") or "12000")
-    if depth > 4:
-        return "<max-depth>"
-    if value is None or isinstance(value, (int, float, bool)):
-        return value
-    if isinstance(value, bytes):
-        return {"type": "bytes", "len": len(value)}
-    if isinstance(value, str):
-        if parse_json_strings:
-            parsed = _maybe_parse_json_string(value)
-            if parsed is not value:
-                return _safe_value(parsed, max_chars=max_chars, depth=depth, parse_json_strings=True)
-        return _truncate_text(value, max_chars)
-    if isinstance(value, dict):
-        normalized = _normalize_payload(value)
-        if normalized is not value:
-            return _safe_value(normalized, max_chars=max_chars, depth=depth, parse_json_strings=parse_json_strings)
-        return {
-            str(k): _safe_value(v, max_chars=max_chars, depth=depth + 1, parse_json_strings=parse_json_strings)
-            for k, v in list(value.items())[:50]
-        }
-    if isinstance(value, (list, tuple, set)):
-        return [
-            _safe_value(v, max_chars=max_chars, depth=depth + 1, parse_json_strings=parse_json_strings)
-            for v in list(value)[:50]
-        ]
-    if hasattr(value, "__dict__"):
-        return _safe_value(vars(value), max_chars=max_chars, depth=depth + 1, parse_json_strings=parse_json_strings)
-    return _truncate_text(repr(value), max_chars)
-
-
-def _extract_last_user_message(messages: Any) -> Any:
-    if not isinstance(messages, list):
-        return None
-    for message in reversed(messages):
-        if isinstance(message, dict) and message.get("role") == "user":
-            return {
-                "role": "user",
-                "content": _safe_value(message.get("content")),
-            }
-    return None
-
-
-def _coerce_request_messages(
-    *,
-    request_messages: Any = None,
-    messages: Any = None,
-    conversation_history: Any = None,
-    user_message: Any = None,
-) -> list[dict[str, Any]]:
-    for candidate in (request_messages, messages, conversation_history):
-        if isinstance(candidate, list):
-            return candidate
-    if user_message is None:
-        return []
-    return [{"role": "user", "content": user_message}]
-
-
-def _serialize_messages(messages: Any) -> list[dict[str, Any]]:
-    if not isinstance(messages, list):
-        return []
-    serialized = []
-    for message in messages[-12:]:
-        if not isinstance(message, dict):
-            continue
-        role = message.get("role")
-        item = {
-            "role": role,
-            "content": _safe_value(
-                message.get("content"),
-                parse_json_strings=(role == "tool"),
-            ),
-        }
-        if role == "tool":
-            if message.get("tool_call_id"):
-                item["tool_call_id"] = message.get("tool_call_id")
-            if message.get("name"):
-                item["name"] = _safe_value(message.get("name"))
-        if message.get("tool_calls"):
-            item["tool_calls"] = _safe_value(message.get("tool_calls"), parse_json_strings=True)
-        serialized.append(item)
-    return serialized
-
-
-def _serialize_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
-    if not tool_calls:
-        return []
-    serialized = []
-    for tool_call in tool_calls:
-        fn = getattr(tool_call, "function", None)
-        name = getattr(fn, "name", None) if fn else None
-        arguments = getattr(fn, "arguments", None) if fn else None
-        safe_arguments = _safe_value(arguments, parse_json_strings=False)
-        serialized.append({
-            "id": getattr(tool_call, "id", None),
-            "type": getattr(tool_call, "type", None) or "function",
-            "name": name,
-            "arguments": safe_arguments,
-            "function": {
-                "name": name,
-                "arguments": safe_arguments,
-            },
-        })
-    return serialized
-
-
-def _serialize_assistant_message(message: Any) -> dict[str, Any]:
-    return {
-        "content": _safe_value(getattr(message, "content", None)),
-        "reasoning": _safe_value(getattr(message, "reasoning", None)),
-        "tool_calls": _serialize_tool_calls(getattr(message, "tool_calls", None)),
-    }
-
-
-def _usage_and_cost(response: Any, *, provider: str, api_mode: str, model: str, base_url: str) -> tuple[dict[str, int], dict[str, float]]:
-    usage_details: Dict[str, int] = {}
-    cost_details: Dict[str, float] = {}
-    raw_usage = getattr(response, "usage", None)
-    if not raw_usage:
-        return usage_details, cost_details
-
-    try:
-        from agent.usage_pricing import estimate_usage_cost, normalize_usage
-
-        canonical = normalize_usage(raw_usage, provider=provider, api_mode=api_mode)
-        # Langfuse usage_details keys follow a naming convention:
-        #   - Dashboard sums all keys containing "input" as input total
-        #   - Dashboard sums all keys containing "output" as output total
-        #   - If no "total" key, Langfuse derives it from all usage types
-        # Use Anthropic-style key names so cache tokens roll into the
-        # dashboard input total automatically.
-        # Ref: https://langfuse.com/docs/model-usage-and-cost
-        usage_details = {
-            "input": canonical.input_tokens,
-            "output": canonical.output_tokens,
-        }
-        if canonical.cache_read_tokens:
-            usage_details["cache_read_input_tokens"] = canonical.cache_read_tokens
-        if canonical.cache_write_tokens:
-            usage_details["cache_creation_input_tokens"] = canonical.cache_write_tokens
-        if canonical.reasoning_tokens:
-            usage_details["reasoning_tokens"] = canonical.reasoning_tokens
-        cost = estimate_usage_cost(
-            model,
-            canonical,
-            provider=provider,
-            base_url=base_url,
-            api_key="",
-        )
-        if cost.amount_usd is not None:
-            # Langfuse cost_details keys must match usage_details keys.
-            # Provide per-type breakdown so dashboard can show cost by type.
-            try:
-                from agent.usage_pricing import get_pricing_entry
-                from decimal import Decimal
-                _ONE_M = Decimal("1000000")
-                entry = get_pricing_entry(model, provider=provider, base_url=base_url)
-                if entry:
-                    if entry.input_cost_per_million is not None and canonical.input_tokens:
-                        cost_details["input"] = float(Decimal(canonical.input_tokens) * entry.input_cost_per_million / _ONE_M)
-                    if entry.output_cost_per_million is not None and canonical.output_tokens:
-                        cost_details["output"] = float(Decimal(canonical.output_tokens) * entry.output_cost_per_million / _ONE_M)
-                    if entry.cache_read_cost_per_million is not None and canonical.cache_read_tokens:
-                        cost_details["cache_read_input_tokens"] = float(Decimal(canonical.cache_read_tokens) * entry.cache_read_cost_per_million / _ONE_M)
-                    if entry.cache_write_cost_per_million is not None and canonical.cache_write_tokens:
-                        cost_details["cache_creation_input_tokens"] = float(Decimal(canonical.cache_write_tokens) * entry.cache_write_cost_per_million / _ONE_M)
-                else:
-                    cost_details["total"] = float(cost.amount_usd)
-            except Exception:
-                cost_details["total"] = float(cost.amount_usd)
-    except Exception as exc:  # pragma: no cover - fail-open
-        _debug(f"usage normalization failed: {exc}")
-
-    return usage_details, cost_details
+from .usage import _usage_and_cost, _summary_usage_and_cost
 
 
 def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform: str, provider: str, model: str,
                       api_mode: str, messages: Any, client: Langfuse,
-                      turn_id: str = "", api_request_id: str = "") -> TraceState:
-    trace_id = client.create_trace_id(seed=f"{session_id or 'sessionless'}::{task_id or task_key}")
+                      turn_id: str = "", api_request_id: str = "", run_id: str = "") -> TraceState:
+    trace_id = client.create_trace_id(seed=f"run:{run_id}" if run_id else f"{session_id or 'sessionless'}::{task_key}")
     trace_input = _extract_last_user_message(messages)
     metadata = {
         "source": "hermes",
@@ -615,6 +278,8 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
         "model": model,
         "api_mode": api_mode,
     }
+    if run_id:
+        metadata["run_id"] = run_id
 
     # session_id must be passed in trace_context for Langfuse session grouping.
     trace_ctx: Dict[str, Any] = {"trace_id": trace_id}
@@ -664,7 +329,7 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
         pass
 
     _debug(f"started trace {trace_id} for {task_key}")
-    return TraceState(trace_id=trace_id, root_ctx=root_ctx, root_span=root_span)
+    return TraceState(trace_id=trace_id, root_ctx=root_ctx, root_span=root_span, run_id=run_id)
 
 
 def _start_child_observation(state: TraceState, *, client: Langfuse, name: str, as_type: str,
@@ -674,18 +339,23 @@ def _start_child_observation(state: TraceState, *, client: Langfuse, name: str, 
         name=name,
         as_type=as_type,
         input=input_value,
-        metadata=metadata or {},
+        metadata={**(metadata or {}), **({"run_id": state.run_id} if state.run_id else {})},
         model=model,
         model_parameters=model_parameters,
     )
 
 
 def _end_observation(observation: Any, *, output: Any = None, metadata: Optional[dict] = None,
-                     usage_details: Optional[dict] = None, cost_details: Optional[dict] = None) -> None:
+                     usage_details: Optional[dict] = None, cost_details: Optional[dict] = None,
+                     level: str | None = None, status_message: str | None = None) -> None:
     if observation is None:
         return
     try:
         update_kwargs: Dict[str, Any] = {}
+        if level:
+            update_kwargs["level"] = level
+        if status_message:
+            update_kwargs["status_message"] = status_message
         if output is not None:
             update_kwargs["output"] = output
         if metadata:
@@ -734,7 +404,8 @@ def _evict_stale_locked() -> None:
             _debug(f"evict stale trace failed: {exc}")
 
 
-def _finish_trace(task_key: str, *, output: Any = None) -> None:
+def _finish_trace(task_key: str, *, output: Any = None, metadata: dict | None = None,
+                  level: str | None = None) -> None:
     client = _get_langfuse()
     if client is None:
         return
@@ -756,7 +427,7 @@ def _finish_trace(task_key: str, *, output: Any = None) -> None:
         if final_output is not None:
             state.root_span.set_trace_io(output=final_output)
             state.root_span.update(output=final_output)
-        state.root_span.end()
+        _end_observation(state.root_span, metadata=metadata, level=level)
     except Exception as exc:  # pragma: no cover - fail-open
         _debug(f"finish trace failed: {exc}")
     finally:
@@ -845,6 +516,7 @@ def on_pre_llm_request(
     user_message: Any = None,
     turn_id: str = "",
     api_request_id: str = "",
+    run_id: str = "",
     **_: Any,
 ) -> None:
     client = _get_langfuse()
@@ -881,6 +553,7 @@ def on_pre_llm_request(
                 client=client,
                 turn_id=turn_id,
                 api_request_id=api_request_id,
+                run_id=run_id,
             )
             _evict_stale_locked()
             _TRACE_STATE[task_key] = state
@@ -968,59 +641,12 @@ def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str =
             base_url=base_url,
         )
     elif isinstance(usage, dict) and usage:
-        # post_api_request passes a pre-built CanonicalUsage summary dict.
-        # Use Langfuse-convention key names: "input", "output", and
-        # "cache_read_input_tokens" / "cache_creation_input_tokens" so the
-        # dashboard sums cache tokens into the input total automatically.
-        _input = usage.get("input_tokens", 0)
-        _output = usage.get("output_tokens", 0) or usage.get("completion_tokens", 0)
-        _cache_read = usage.get("cache_read_tokens", 0)
-        _cache_write = usage.get("cache_write_tokens", 0)
-        _reasoning = usage.get("reasoning_tokens", 0)
-        usage_details = {
-            "input": _input,
-            "output": _output,
-        }
-        if _cache_read:
-            usage_details["cache_read_input_tokens"] = _cache_read
-        if _cache_write:
-            usage_details["cache_creation_input_tokens"] = _cache_write
-        if _reasoning:
-            usage_details["reasoning_tokens"] = _reasoning
-        cost_details = {}
-        # Estimate per-type cost from the summary if possible
-        try:
-            from agent.usage_pricing import CanonicalUsage, estimate_usage_cost, get_pricing_entry
-            from decimal import Decimal
-            _ONE_M = Decimal("1000000")
-            _cu = CanonicalUsage(
-                input_tokens=_input,
-                output_tokens=_output,
-                cache_read_tokens=_cache_read,
-                cache_write_tokens=_cache_write,
-                reasoning_tokens=_reasoning,
-            )
-            entry = get_pricing_entry(model, provider=provider, base_url=base_url)
-            if entry:
-                if entry.input_cost_per_million is not None and _input:
-                    cost_details["input"] = float(Decimal(_input) * entry.input_cost_per_million / _ONE_M)
-                if entry.output_cost_per_million is not None and _output:
-                    cost_details["output"] = float(Decimal(_output) * entry.output_cost_per_million / _ONE_M)
-                if entry.cache_read_cost_per_million is not None and _cache_read:
-                    cost_details["cache_read_input_tokens"] = float(Decimal(_cache_read) * entry.cache_read_cost_per_million / _ONE_M)
-                if entry.cache_write_cost_per_million is not None and _cache_write:
-                    cost_details["cache_creation_input_tokens"] = float(Decimal(_cache_write) * entry.cache_write_cost_per_million / _ONE_M)
-            else:
-                _cost = estimate_usage_cost(model, _cu, provider=provider, base_url=base_url, api_key="")
-                if _cost.amount_usd is not None:
-                    cost_details["total"] = float(_cost.amount_usd)
-        except Exception:
-            pass
+        usage_details, cost_details = _summary_usage_and_cost(usage, model=model, provider=provider, base_url=base_url)
     else:
         usage_details, cost_details = {}, {}
 
     tool_count = len(output.get("tool_calls", [])) or assistant_tool_call_count
-    gen_metadata: Dict[str, Any] = {"tool_call_count": tool_count}
+    gen_metadata: Dict[str, Any] = {"tool_call_count": tool_count, "cost_source": "estimate"}
     if api_duration and api_duration > 0:
         gen_metadata["api_duration_s"] = round(api_duration, 3)
     if finish_reason:
@@ -1073,7 +699,8 @@ def on_pre_tool_call(*, tool_name: str = "", args: Any = None, task_id: str = ""
 
 def on_post_tool_call(*, tool_name: str = "", args: Any = None, result: Any = None,
                       task_id: str = "", session_id: str = "", tool_call_id: str = "",
-                      turn_id: str = "", api_request_id: str = "", **_: Any) -> None:
+                      turn_id: str = "", api_request_id: str = "", status: str = "ok",
+                      error_type: str = "", error_message: str = "", **_: Any) -> None:
     task_key = _trace_key(
         task_id,
         session_id,
@@ -1121,7 +748,35 @@ def on_post_tool_call(*, tool_name: str = "", args: Any = None, result: Any = No
     _end_observation(
         observation,
         output=safe_result_value,
-        metadata={"tool_name": tool_name, "args": _safe_value(args, parse_json_strings=True)},
+        metadata={"tool_name": tool_name, "args": _safe_value(args, parse_json_strings=True),
+                  "status": status, "error_type": error_type},
+        level="ERROR" if status == "error" else "WARNING" if status in {"blocked", "cancelled"} else None,
+        status_message=_safe_value(error_message) if error_message else None,
+    )
+
+
+def on_api_request_error(*, task_id: str = "", session_id: str = "", turn_id: str = "",
+                         api_request_id: str = "", api_call_count: int = 0,
+                         error: dict | None = None, status_code: int | None = None,
+                         retry_count: int = 0, retryable: bool = False,
+                         api_duration: float = 0, **_: object) -> None:
+    key = _trace_key(task_id, session_id, turn_id=turn_id, api_request_id=api_request_id)
+    with _STATE_LOCK:
+        state = _TRACE_STATE.get(key)
+        generation = state.generations.pop(_request_key(api_call_count), None) if state else None
+    _end_observation(
+        generation, output=_safe_value(error), level="ERROR",
+        metadata={"status_code": status_code, "retry_count": retry_count,
+                  "retryable": retryable, "api_duration_s": api_duration},
+    )
+
+
+def on_session_end(*, task_id: str = "", session_id: str = "", turn_id: str = "",
+                   completed: bool = False, interrupted: bool = False, **_: object) -> None:
+    key = _trace_key(task_id, session_id, turn_id=turn_id)
+    _finish_trace(
+        key, metadata={"completed": completed, "interrupted": interrupted},
+        level="WARNING" if interrupted else None if completed else "ERROR",
     )
 
 
@@ -1135,3 +790,5 @@ def register(ctx) -> None:
     ctx.register_hook("post_llm_call", on_post_llm_call)
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("post_tool_call", on_post_tool_call)
+    ctx.register_hook("api_request_error", on_api_request_error)
+    ctx.register_hook("on_session_end", on_session_end)

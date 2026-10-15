@@ -1513,6 +1513,7 @@ class APIServerRuntimeMixin:
                 ephemeral_system_prompt=None,
                 session_id=agent_session_id,
                 runtime_message_id=runtime_user_message_id,
+                runtime_run_id=run_id,
                 stream_delta_callback=lambda delta: session.emit("text_delta", {"delta": delta}) if delta else None,
                 tool_start_callback=on_tool_start,
                 tool_complete_callback=on_tool_complete,
