@@ -198,3 +198,25 @@ def test_runtime_capability_rejects_retired_generic_interrupt_operation():
             "/v1/runtime/runs/run_auth_test/interrupt",
             b"{}",
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('suffix,method,body',[('events','GET',b''),('attach','POST',b'{"model":"test-model"}')])
+async def test_execution_subscription_capability_binds_run_cursor_query_and_body(capability,suffix,method,body):
+    from types import SimpleNamespace
+    from yarl import URL
+    verifier=RuntimeCapabilityVerifier(RuntimeCapabilityConfig.from_env())
+    path=f'/v1/runtime/runs/run_auth_test/{suffix}'
+    query='execution_id=exec_test&lease_epoch=100'
+    claims=_claims(body)
+    action=f'runtime.run.{suffix}'
+    claims.update(action=action,method=method,path=path,query=query,operation_id=f'{action}:run_auth_test:{hashlib.sha256(body).hexdigest()}')
+    class Request:
+        def __init__(self,url,data):
+            self.rel_url=URL(url);self.method=method;self.data=data
+            self.headers={'Authorization':'Bearer '+_token(capability,claims),'X-Ultra-Service-Authorization':'Bearer runtime-service-test'}
+        async def read(self):return self.data
+    for url,data in ((path+'?'+query.replace('100','101'),body),(path.replace('run_auth_test','another')+'?'+query,body),(path+'?'+query,body+b' ')):
+        with pytest.raises(RuntimeCapabilityError):await verifier.verify(Request(url,data))
+    await verifier.verify(Request(path+'?'+query,body))
+    with pytest.raises(RuntimeCapabilityError):await verifier.verify(Request(path+'?'+query,body))

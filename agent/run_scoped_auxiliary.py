@@ -18,15 +18,13 @@ _RUN_SCOPED_AUXILIARY: ContextVar[dict[str, dict[str, str]]] = ContextVar(
 
 
 def bind_run_scoped_auxiliary(
-    capabilities: Mapping[str, Mapping[str, str]],
+    capabilities: Mapping[str, dict[str, str]],
 ) -> Token[dict[str, dict[str, str]]]:
     """Bind validated auxiliary capabilities to the current Runtime request."""
-    copied = {
-        str(task): {str(key): str(value) for key, value in capability.items()}
-        for task, capability in capabilities.items()
-    }
-    return _RUN_SCOPED_AUXILIARY.set(copied)
-
+    # The execution owns these capability dictionaries. Keep their references
+    # so host reattachment can renew credentials for this same running context.
+    # The outer task map and all values returned to callers remain isolated.
+    return _RUN_SCOPED_AUXILIARY.set(dict(capabilities))
 
 def get_run_scoped_auxiliary(task: str) -> dict[str, str] | None:
     """Return a defensive copy of the capability for one auxiliary task."""

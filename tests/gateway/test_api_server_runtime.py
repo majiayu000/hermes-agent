@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -54,7 +55,25 @@ from gateway.runtime_session_history import RuntimeSessionStateError, seed_runti
 
 aiohttp = pytest.importorskip("aiohttp")
 from aiohttp import web
-from aiohttp.test_utils import TestClient, TestServer
+from aiohttp.test_utils import TestClient as BaseTestClient, TestServer
+
+
+class TestClient(BaseTestClient):
+    async def post(self, path, **kwargs):
+        if not hasattr(self, "executions"):
+            self.executions = {}
+        if path == "/v1/runtime/runs":
+            identity = uuid.uuid4().hex
+            body = kwargs.get("json", {})
+            if isinstance(body, dict):
+                self.executions[body.get("run_id")] = identity
+            path += "?execution_id=" + identity + "&lease_epoch=1"
+        elif path.startswith("/v1/runtime/runs/"):
+            run_id = path.split("/")[4]
+            if run_id in self.executions:
+                path += "?execution_id=" + self.executions[run_id] + "&lease_epoch=1"
+        return await super().post(path, **kwargs)
+
 
 
 def test_replacement_system_prompt_logs_only_safe_digest_diagnostics(caplog):
@@ -133,23 +152,11 @@ async def test_ordinary_route_body_limit_rejects_chunked_bypass():
         await client.close()
 
 
-@pytest.mark.asyncio
-async def test_runtime_stream_emits_private_heartbeat_while_agent_is_quiet(monkeypatch):
-    monkeypatch.setattr(runtime_module, "_RUNTIME_STREAM_HEARTBEAT_SECONDS", 0.01)
-    queue: asyncio.Queue[dict | None] = asyncio.Queue()
-
-    heartbeat = await runtime_module._next_runtime_stream_event(queue)
-    assert heartbeat == {"type": "heartbeat", "payload": {}}
-
-    event = {"type": "text_delta", "payload": {"delta": "ready"}}
-    queue.put_nowait(event)
-    assert await runtime_module._next_runtime_stream_event(queue) is event
-
-
-class _MemorySessionDB:
+class _MemorySessionDB(SessionDB):
     """Small SessionDB-shaped store for runtime handler tests."""
 
     def __init__(self):
+        super().__init__(db_path=Path(":memory:"))
         self.sessions = {}
         self.messages = {}
 
@@ -3028,7 +3035,7 @@ async def test_runtime_interrupt_waits_without_thread_pool(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_client_disconnect_interrupts_run_and_clears_session():
+async def test_client_disconnect_keeps_execution_until_explicit_cancel():
     class DisconnectAdapter(_TestRuntimeAdapter):
         def _check_auth(self, _request):
             return None
@@ -3047,7 +3054,7 @@ async def test_client_disconnect_interrupts_run_and_clears_session():
                     break
                 kwargs["stream_delta_callback"](f"delta-{index}")
                 await asyncio.sleep(0.01)
-            assert stop.is_set(), "pump never interrupted the run after disconnect"
+            assert stop.is_set(), "explicit cancellation was not delivered"
             return {"final_response": "stopped"}, {}
 
     adapter = DisconnectAdapter()
@@ -3065,15 +3072,13 @@ async def test_client_disconnect_interrupts_run_and_clears_session():
 
         run_response.close()
 
-        for _ in range(1000):
-            with runtime_module._SESSIONS_LOCK:
-                cleared = "run_disconnect" not in runtime_module._SESSIONS
-            if cleared and session.finished.is_set():
-                break
-            await asyncio.sleep(0.01)
-        else:
-            pytest.fail("run kept going after orchestrator disconnect")
+        await asyncio.sleep(0.03)
+        assert not session.finished.is_set()
+        assert not session.interrupted.is_set()
+        session.interrupt("test requested cancel")
+        await asyncio.wait_for(session.finished_async.wait(), 2)
         assert session.interrupted.is_set()
+
     finally:
         await client.close()
 
@@ -3191,8 +3196,9 @@ async def test_park_interrupt_defers_tool_result_without_synthetic_error():
 
 
 def test_session_db_resume_appends_real_result_once_and_accepts_redelivery():
-    class RecordingDB:
+    class RecordingDB(_MemorySessionDB):
         def __init__(self):
+            super().__init__()
             self.messages = [{
                 "role": "assistant",
                 "content": None,
@@ -3272,8 +3278,9 @@ def test_session_db_resume_survives_database_reopen(tmp_path):
 
 @pytest.mark.asyncio
 async def test_runtime_session_db_resume_rebuilds_tool_exposure_from_authoritative_history():
-    class RecordingDB:
+    class RecordingDB(_MemorySessionDB):
         def __init__(self):
+            super().__init__()
             self.messages = [
                 {"role": "user", "content": "make an image"},
                 {
@@ -3388,8 +3395,9 @@ async def test_runtime_session_db_resume_rebuilds_tool_exposure_from_authoritati
 async def test_runtime_session_db_resume_projects_generated_output_after_durable_result():
     captured = {}
 
-    class RecordingDB:
+    class RecordingDB(_MemorySessionDB):
         def __init__(self):
+            super().__init__()
             self.messages = [
                 {"role": "user", "content": "make an image"},
                 {

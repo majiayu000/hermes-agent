@@ -278,8 +278,9 @@
   "x-ultra-contract": {
     "name": "ultra.runtime.run-request",
     "major": 1,
-    "minor": 7,
+    "minor": 8,
     "features": [
+      "execution_subscription.v1",
       "invoked_skills.v1",
       "llm_egress.v1",
       "media_reference_resolution.v1",

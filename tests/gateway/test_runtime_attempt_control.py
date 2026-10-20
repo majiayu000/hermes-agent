@@ -67,6 +67,9 @@ class _RuntimeOnlyAdapter(APIServerRuntimeControlMixin, APIServerLifecycleMixin)
     async def _handle_runtime_run(self, _request):
         return web.Response()
 
+    async def _handle_runtime_attach(self, _request):
+        return web.Response()
+
     async def _handle_runtime_tool_result(self, _request):
         return web.Response()
 

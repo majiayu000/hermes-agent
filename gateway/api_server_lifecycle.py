@@ -78,6 +78,8 @@ class APIServerLifecycleMixin:
         self._app.router.add_get("/healthz", self._handle_health)
         self._app.router.add_get("/v1/runtime/manifest", self._handle_runtime_manifest)
         self._app.router.add_post("/v1/runtime/runs", self._handle_runtime_run)
+        self._app.router.add_get("/v1/runtime/runs/{run_id}/events", self._handle_runtime_attach)
+        self._app.router.add_post("/v1/runtime/runs/{run_id}/attach", self._handle_runtime_attach)
         self._app.router.add_post("/v1/runtime/runs/{run_id}/tool-results", self._handle_runtime_tool_result)
         self._app.router.add_post("/v1/runtime/runs/{run_id}/control-results", self._handle_runtime_control_result)
         self._app.router.add_post("/v1/runtime/runs/{run_id}/suspend", self._handle_runtime_suspend)

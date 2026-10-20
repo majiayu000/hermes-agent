@@ -28,6 +28,8 @@ from gateway.runtime_capability_auth import (
 )
 
 RUNTIME_ROUTES = {
+    ("GET", "/v1/runtime/runs/{run_id}/events"),
+    ("POST", "/v1/runtime/runs/{run_id}/attach"),
     ("GET", "/healthz"),
     ("GET", "/v1/runtime/manifest"),
     ("POST", "/v1/runtime/runs"),

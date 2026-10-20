@@ -6,6 +6,7 @@ import asyncio
 from typing import Any
 
 from gateway.api_server_shared import web
+from gateway.runtime_execution import controls_execution
 from gateway.api_server_runtime import _SESSIONS, _SESSIONS_LOCK
 
 _SUSPEND_REASONS = frozenset({"tool_operation", "human_approval", "user_input"})
@@ -82,6 +83,8 @@ class APIServerRuntimeControlMixin:
         request["hermes_run_id"] = run_id
         with _SESSIONS_LOCK:
             session = _SESSIONS.get(run_id)
+        if session is not None and getattr(session, "execution", None) is not None and not controls_execution(request, session.execution):
+            return web.json_response({"error": {"code": "runtime_execution_conflict"}}, status=409)
         if session is None:
             return web.json_response(
                 {"error": {"code": "run_not_found", "message": "run is not active"}},
