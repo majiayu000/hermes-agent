@@ -8,17 +8,18 @@ from gateway.runtime_prompt_catalog import (
 )
 
 
-def test_ultra_agent_v1_profile_preserves_migrated_prompt_bytes():
+def test_ultra_agent_v1_profile_pins_reviewed_prompt_bytes():
     profile = load_runtime_prompt_profile("ultra-agent-v1")
 
     assert profile.version == "ultra-agent-v1"
     assert profile.digest == (
-        "sha256:8111fda1e279e61eab2bf71e95184ef26da53800e05f6c08773d63de07fd50bc"
+        "sha256:10aa95237ab81241f839ac7ce1e808631b479798635424f18e9819bf2611084b"
     )
     assert len(profile.modules) == 20
     assert profile.modules[0] == "01-identity.md"
     assert profile.modules[-1] == "20-runtime-environment.md"
     assert profile.text.startswith("<!-- module 1/20:")
+    assert "media request failing before provider submission says nothing about LLM charges" in profile.text
 
 
 def test_profile_context_resolves_locally_without_prompt_body():

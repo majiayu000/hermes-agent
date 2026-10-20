@@ -54,6 +54,7 @@ from gateway.runtime_contract_models import (
 from agent.tool_dispatch_helpers import DeferredToolResult
 from gateway.runtime_session_history import (
     RuntimeSessionStateError as _RuntimeSessionStateError,
+    _project_tool_result,
     load_runtime_session_history as _load_runtime_session_history,
     retry_session_db_history as _retry_session_db_history,
     resume_session_db_history as _resume_session_db_history,
@@ -306,7 +307,7 @@ def _failed_tool_result_projection(transport: Any) -> dict[str, Any]:
         return _invalid_failed_tool_result()
     if decoded.ok:
         return _invalid_failed_tool_result()
-    return {key: value for key, value in transport.items() if key not in {"call_id", "request_id", "ok"}}
+    return decoded.agent_content()
 
 
 def _skill_scope_error(name: str) -> str:
@@ -1054,20 +1055,30 @@ class RuntimeBridgeSession:
                 code, message = "runtime_deadline_exceeded", "tool-result deadline exceeded"
             return json.dumps({"error": {"code": code, "message": message, "retryable": False}})
         result = pending.result or {}
-        if result.get("ok"):
-            return json.dumps(result.get("result"), ensure_ascii=False, separators=(",", ":"))
-        failure = _failed_tool_result_projection(result)
-        return json.dumps(failure, ensure_ascii=False, separators=(",", ":"))
+        content = decode_runtime_tool_result(result).agent_content()
+        return json.dumps(content, ensure_ascii=False, separators=(",", ":"))
 
     def submit_result(self, result: dict[str, Any]) -> bool:
         call_id = str(result.get("call_id") or "")
         with self.lock:
-            pending = self.pending.pop(call_id, None)
+            pending = self.pending.get(call_id)
             if pending is None:
                 return False
+            if pending.result is not None:
+                return pending.result == result
+            # The assistant call was persisted before emitting tool_request.
+            # Commit its result before waking the Agent or acknowledging the host.
+            message = _project_tool_result({"function": {"name": pending.name}}, result)
+            self.session_db.append_message(
+                session_id=self.agent_session_id,
+                role="tool",
+                content=message["content"],
+                tool_name=message["name"],
+                tool_call_id=call_id,
+            )
             pending.result = result
             pending.ready.set()
-        return True
+            return True
 
     def submit_control_result(self, result: dict[str, Any]) -> bool:
         request_id = str(result.get("request_id") or "")
@@ -1607,8 +1618,13 @@ class APIServerRuntimeMixin:
                 },
                 status=422,
             )
-        if not isinstance(result, dict) or not session.submit_result(result):
-            return web.json_response({"error": {"code": "invalid_tool_result", "message": "unknown call_id"}}, status=409)
+        try:
+            accepted = await asyncio.to_thread(session.submit_result, result)
+        except Exception:
+            logger.exception("Runtime tool result persistence failed for run %s", run_id)
+            return web.json_response({"error": {"code": "runtime_session_unavailable", "message": "Tool result could not be persisted"}}, status=503)
+        if not accepted:
+            return web.json_response({"error": {"code": "invalid_tool_result", "message": "unknown call_id or conflicting result"}}, status=409)
         return web.Response(status=204)
 
     async def _handle_runtime_control_result(self, request: "web.Request") -> "web.Response":

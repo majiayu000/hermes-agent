@@ -1490,9 +1490,9 @@ def test_runtime_resume_projects_and_persists_result_without_synthetic_user():
     )
     history = db.get_messages_as_conversation("thread_resume")
     result = {
-        "tool_call_id": "call_media",
-        "status": "succeeded",
-        "output": {"batch_status": "succeeded", "jobs": [{"job_id": "job_1"}]},
+        "call_id": "call_media",
+        "ok": True,
+        "result": {"batch_status": "succeeded", "jobs": [{"job_id": "job_1"}]},
     }
     resumed = _resume_session_db_history(db, "thread_resume", history, [result])
     assert [message["role"] for message in resumed] == ["user", "assistant", "tool"]
@@ -1518,7 +1518,7 @@ def test_runtime_resume_rejects_more_than_one_unfinished_tool_call():
             db,
             "thread_resume_conflict",
             db.get_messages_as_conversation("thread_resume_conflict"),
-            [{"tool_call_id": "call_1", "status": "succeeded", "output": {}}],
+            [{"call_id": "call_1", "ok": True, "result": {}}],
         )
 
 
@@ -1642,9 +1642,9 @@ async def test_runtime_resume_wiring_reaches_agent_without_new_user_message():
                 "digest": digest,
             },
             "tool_results": [{
-                "tool_call_id": "call_media",
-                "status": "succeeded",
-                "output": {"batch_status": "succeeded"},
+                "call_id": "call_media",
+                "ok": True,
+                "result": {"batch_status": "succeeded"},
             }],
             "tools": [{
                 "name": "media.generate_image",
@@ -2752,9 +2752,9 @@ async def test_runtime_rebootstrap_restores_tool_result_without_reexecution():
 
     adapter = CaptureAdapter()
     result = {
-        "tool_call_id": "call-media",
-        "status": "succeeded",
-        "output": {"asset_id": "asset-1"},
+        "call_id": "call-media",
+        "ok": True,
+        "result": {"asset_id": "asset-1"},
     }
     status, events = await _complete_test_run(adapter, _run_body(
         "run_rebootstrap_resume",
@@ -3085,28 +3085,28 @@ def test_resume_history_projects_externalized_output_ref():
         "thread_ext",
         db.get_messages_as_conversation("thread_ext"),
         [{
-            "tool_call_id": "call_ext",
-            "status": "succeeded",
-            "output_ref": "asset://image/01",
+            "call_id": "call_ext",
+            "ok": True,
+            "result": {"status": "externalized", "output_ref": {"ref": "toolout_image_01", "size_bytes": 90000}},
         }],
     )
     assert json.loads(history[-1]["content"]) == {
         "status": "externalized",
-        "output_ref": "asset://image/01",
+        "output_ref": {"ref": "toolout_image_01", "size_bytes": 90000},
     }
 
 
-def test_resume_history_rejects_ambiguous_output_fields():
+def test_resume_history_rejects_fields_outside_canonical_envelope():
     db = _runtime_call_db("thread_inline", ("call_inline", "media.generate_image"))
-    with pytest.raises(ValueError, match="exactly one output field"):
+    with pytest.raises(ValueError, match="output_ref"):
         _resume_session_db_history(
             db,
             "thread_inline",
             db.get_messages_as_conversation("thread_inline"),
             [{
-                "tool_call_id": "call_inline",
-                "status": "succeeded",
-                "output": {"url": "asset://image/1"},
+                "call_id": "call_inline",
+                "ok": True,
+                "result": {"url": "asset://image/1"},
                 "output_ref": "asset://image/01",
             }],
         )
@@ -3208,15 +3208,15 @@ def test_session_db_resume_appends_real_result_once_and_accepts_redelivery():
             self.messages.append({"role": message["role"], **message})
 
     result = {
-        "tool_call_id": "call_media",
-        "status": "succeeded",
-        "output": {"asset_id": "asset_1", "url": "asset://image/1"},
+        "call_id": "call_media",
+        "ok": True,
+        "result": {"asset_id": "asset_1", "url": "asset://image/1"},
     }
     db = RecordingDB()
     first = _resume_session_db_history(db, "thread_1", list(db.messages), [result])
     redelivered = {
         **result,
-        "output": {"url": "asset://image/1", "asset_id": "asset_1"},
+        "result": {"url": "asset://image/1", "asset_id": "asset_1"},
     }
     second = _resume_session_db_history(
         db,
@@ -3254,9 +3254,9 @@ def test_session_db_resume_survives_database_reopen(tmp_path):
     reopened = SessionDB(db_path=db_path)
     history = reopened.get_messages_as_conversation(session_id)
     result = {
-        "tool_call_id": "call_restart",
-        "status": "succeeded",
-        "output": {"asset_id": "asset_restart"},
+        "call_id": "call_restart",
+        "ok": True,
+        "result": {"asset_id": "asset_restart"},
     }
     resumed = _resume_session_db_history(reopened, session_id, history, [result])
     assert [message["role"] for message in resumed] == ["user", "assistant", "tool"]
@@ -3360,9 +3360,9 @@ async def test_runtime_session_db_resume_rebuilds_tool_exposure_from_authoritati
             context={"session_id": "thread_session"},
             messages=[],
             tool_results=[{
-                "tool_call_id": "call_media",
-                "status": "succeeded",
-                "output": {"asset_id": "asset_1"},
+                "call_id": "call_media",
+                "ok": True,
+                "result": {"asset_id": "asset_1"},
             }],
             tools=[{
                 "name": "media.generate_image",
@@ -3499,9 +3499,9 @@ async def test_runtime_session_db_resume_projects_generated_output_after_durable
             context={"session_id": "thread_generated_output"},
             messages=[],
             tool_results=[{
-                "tool_call_id": "call_media",
-                "status": "succeeded",
-                "output": {"asset_id": "asset_1", "output_id": "output_1"},
+                "call_id": "call_media",
+                "ok": True,
+                "result": {"asset_id": "asset_1", "output_id": "output_1"},
             }],
             tools=[{
                 "name": "media.generate_image",

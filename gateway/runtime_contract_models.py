@@ -125,7 +125,7 @@ class RuntimeRunRequest(_StrictModel):
     tools: list[JsonObject]
     system_context: RuntimeSystemContext
     context: RuntimeContext
-    tool_results: list[JsonObject] | None = None
+    tool_results: list[RuntimeToolResult] | None = None
     runtime_context: JsonObject | None = None
     artifact_manifest: list[JsonObject] | None = None
     attachment_references: (
@@ -180,6 +180,13 @@ class RuntimeToolResult(_StrictModel):
         if not self.ok and self.error is None:
             raise ValueError("failed tool result requires error")
         return self
+
+    def agent_content(self) -> JsonValue:
+        """Use identical Agent-visible content for live delivery and replay."""
+        if self.ok:
+            return self.result
+        body = self.model_dump(mode="json", exclude_unset=True)
+        return {key: value for key, value in body.items() if key not in {"call_id", "ok"}}
 
 
 class RuntimeManifestContract(_StrictModel):

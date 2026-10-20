@@ -30,3 +30,22 @@ def test_literal_prompt_still_requires_declared_type():
     for request in [{"duration": 5}, {"duration": 5, "prompt": 42}]:
         error = _model_request_contract_error("media.generate_video", {"requests": [{"model": "test/video", **request}]}, contract())
         assert "prompt" in error["error"]["message"]
+
+
+def test_complete_source_document_does_not_break_private_contract_receipt():
+    from gateway.runtime_model_contract import _model_parameter_contract
+
+    source = {"components": {"schemas": {"Input": {
+        "properties": {"duration": {"type": "integer", "minimum": 1, "maximum": 20}},
+        "allOf": [{"required": ["duration"]}],
+    }}}}
+    payload = {
+        "model": "test/video", "observed_schema_digest": "sha256:" + "a" * 64,
+        "schema_document": source,
+        "parameters": [{"name": "duration", "type": "integer", "required": True}],
+    }
+    decoded = _model_parameter_contract(payload)
+    assert decoded is not None
+    assert decoded[0] == "test/video"
+    assert decoded[2]["duration"]["required"] is True
+    assert payload["schema_document"] is source

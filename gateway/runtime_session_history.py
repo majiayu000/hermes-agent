@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from gateway.runtime_contract_models import decode_runtime_tool_result
+
 
 class RuntimeSessionStateError(RuntimeError):
     """SessionDB state is unavailable or conflicts with a Runtime request."""
@@ -57,37 +59,9 @@ def _project_tool_result(
     result: dict[str, Any],
 ) -> dict[str, Any]:
     """Project the supported durable result into an OpenAI tool message."""
-    allowed_keys = {"tool_call_id", "status", "output", "output_ref", "error"}
-    if set(result) - allowed_keys:
-        raise ValueError("tool_result contains unsupported fields")
-    call_id = str(result.get("tool_call_id") or "").strip()
-    if not call_id:
-        raise ValueError("tool_result.tool_call_id is required")
-    status = result.get("status")
-    if not isinstance(status, str):
-        raise ValueError("tool_result.status is required")
-    status = status.strip()
-    if status == "succeeded":
-        if ("output" in result) == ("output_ref" in result):
-            raise ValueError("succeeded tool_result requires exactly one output field")
-        if "output_ref" in result:
-            output_ref = result.get("output_ref")
-            if not isinstance(output_ref, str) or not output_ref.strip():
-                raise ValueError("tool_result.output_ref must be a non-empty string")
-            content: Any = {
-                "status": "externalized",
-                "output_ref": output_ref,
-            }
-        else:
-            content = result.get("output")
-    elif status == "failed":
-        if set(result) != {"tool_call_id", "status", "error"}:
-            raise ValueError("failed tool_result requires only an error")
-        if not isinstance(result.get("error"), dict):
-            raise ValueError("tool_result.error must be an object")
-        content = {"error": result["error"]}
-    else:
-        raise ValueError("tool_result.status must be succeeded or failed")
+    decoded = decode_runtime_tool_result(result)
+    call_id = decoded.call_id
+    content = decoded.agent_content()
 
     function = matching_call.get("function") or {}
     tool_name = str(function.get("name") or "").strip()
@@ -119,9 +93,9 @@ def resume_session_db_history(
     ):
         raise ValueError("exactly one tool_result is required for Runtime resume")
     result = tool_results[0]
-    call_id = str(result.get("tool_call_id") or "").strip()
+    call_id = str(result.get("call_id") or "").strip()
     if not call_id:
-        raise ValueError("tool_result.tool_call_id is required")
+        raise ValueError("tool_result.call_id is required")
 
     assistant_index = -1
     matching_call: dict[str, Any] | None = None
@@ -270,7 +244,7 @@ def seed_recovery_tool_call(
     if (
         not isinstance(tool_results, list)
         or len(tool_results) != 1
-        or str(tool_results[0].get("tool_call_id") or "").strip() != call_id
+        or str(tool_results[0].get("call_id") or "").strip() != call_id
     ):
         raise ValueError("recovery_tool_call must match the durable tool_result")
     try:

@@ -1,5 +1,12 @@
 # Runtime contract changelog
 
+## 1.7.0 — 2026-10-18
+
+Resume tool_results use the same call_id/ok/result/error envelope as live tool
+results. Preserve independent error and result evidence and structured output
+references. Upgrade producer and consumer together; the old resume envelope is
+not accepted. No executor or provider operation is replayed by this change.
+
 ## 1.6.0 — 2026-09-10
 
 Tool errors require code/message and preserve business extensions without a retry

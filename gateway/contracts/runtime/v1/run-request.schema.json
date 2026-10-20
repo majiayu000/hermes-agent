@@ -114,9 +114,7 @@
     },
     "tool_results": {
       "type": "array",
-      "items": {
-        "type": "object"
-      }
+      "items": {"$ref": "tool-result.schema.json"}
     },
     "context": {
       "type": "object",
@@ -280,7 +278,7 @@
   "x-ultra-contract": {
     "name": "ultra.runtime.run-request",
     "major": 1,
-    "minor": 6,
+    "minor": 7,
     "features": [
       "invoked_skills.v1",
       "llm_egress.v1",

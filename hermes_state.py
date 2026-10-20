@@ -2934,6 +2934,25 @@ class SessionDB:
             num_tool_calls = len(tool_calls) if isinstance(tool_calls, list) else 1
 
         def _do(conn):
+            # Runtime delivery can persist a tool result before the Agent's
+            # normal transcript flush. The call identity owns one durable result.
+            if role == "tool" and tool_call_id:
+                existing = conn.execute(
+                    """SELECT id, content FROM messages
+                       WHERE session_id = ? AND role = 'tool' AND tool_call_id = ?
+                       AND active = 1""",
+                    (session_id, tool_call_id),
+                ).fetchall()
+                if existing:
+                    same_content = existing[0]["content"] == stored_content
+                    if not same_content:
+                        try:
+                            same_content = json.loads(existing[0]["content"]) == json.loads(stored_content)
+                        except (ValueError, TypeError):
+                            pass
+                    if len(existing) != 1 or not same_content:
+                        raise ValueError("conflicting result for persisted tool_call_id")
+                    return existing[0]["id"]
             cursor = conn.execute(
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, timestamp, token_count, finish_reason,

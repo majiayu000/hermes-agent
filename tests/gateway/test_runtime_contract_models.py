@@ -194,3 +194,17 @@ def test_tool_error_preserves_business_extensions_and_optional_advice():
     assert decoded.error.model_dump(exclude_unset=True) == payload["error"]
     with pytest.raises(ValidationError):
         decode_runtime_tool_result({**payload, "error": {**payload["error"], "retryable": None}})
+
+
+def test_resume_results_use_the_live_typed_contract():
+    valid = {**_valid_run_request(), "intent": "resume", "tool_results": [
+        {"call_id": "call_fixture", "ok": True, "result": None},
+    ]}
+    assert isinstance(decode_runtime_run_request(valid).tool_results[0], RuntimeToolResult)
+    for invalid in [
+        {"tool_call_id": "call_fixture", "status": "succeeded", "output": {}},
+        {"call_id": "call_fixture", "ok": False},
+        {"call_id": "call_fixture", "ok": False, "error": {"code": "missing_message"}},
+    ]:
+        with pytest.raises(ValidationError):
+            decode_runtime_run_request({**valid, "tool_results": [invalid]})

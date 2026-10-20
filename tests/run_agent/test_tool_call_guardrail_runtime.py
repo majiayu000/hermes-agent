@@ -44,8 +44,9 @@ def _make_agent(*tool_names: str, max_iterations: int = 10, config: dict | None 
         patch("run_agent.OpenAI"),
     ):
         agent = AIAgent(
+            model="test/model",
             api_key="test-key-1234567890",
-            base_url="https://openrouter.ai/api/v1",
+            base_url="http://127.0.0.1:1/v1",
             max_iterations=max_iterations,
             quiet_mode=True,
             skip_context_files=True,
@@ -353,3 +354,60 @@ def test_guardrail_halt_emits_final_response_through_stream_delta_callback():
     assert halt_text in text_deltas, (
         f"halt message was never streamed; callback only saw {deltas!r}"
     )
+
+
+def test_run_conversation_corrects_distinct_validation_errors_then_succeeds():
+    """Exercise the real loop with feedback-driven model and tool stubs, no provider."""
+    agent = _make_agent("web_search", config=_hard_stop_config())
+    executed = []
+    observed_errors = []
+
+    def validate(name, args, task_id, **kwargs):
+        executed.append(dict(args))
+        if "query" not in args:
+            field, reason = "query", "required string"
+        elif not isinstance(args["query"], str):
+            field, reason = "query", "must be string"
+        elif args.get("limit", 0) < 1:
+            field, reason = "limit", "must be at least 1"
+        else:
+            return json.dumps({"results": ["found"]})
+        return json.dumps({"error": {"field": field, "reason": reason,
+                                     "provider_submission_started": False}})
+
+    def respond(**kwargs):
+        results = [m for m in kwargs["messages"] if m.get("role") == "tool"]
+        args = {}
+        if results:
+            # External tool results have an untrusted-data wrapper and may end in a loop warning.
+            content = results[-1]["content"]
+            payload, _ = json.JSONDecoder().raw_decode(content[content.index("{"):])
+            if "results" in payload:
+                return _mock_response(content="found")
+            error = payload["error"]
+            observed_errors.append(error)
+            if error["reason"] == "required string":
+                args = {"query": 123}
+            elif error["reason"] == "must be string":
+                args = {"query": "corrected"}
+            else:
+                args = {"query": "corrected", "limit": 1}
+        return _mock_response(content="", finish_reason="tool_calls",
+                              tool_calls=[_mock_tool_call("web_search", json.dumps(args))])
+
+    agent.client.chat.completions.create.side_effect = respond
+    with (
+        patch("run_agent.handle_function_call", side_effect=validate),
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        result = agent.run_conversation("Find a result, correcting validation errors")
+
+    assert executed == [{}, {"query": 123}, {"query": "corrected"},
+                        {"query": "corrected", "limit": 1}]
+    assert len(observed_errors) == 3
+    assert all(e["provider_submission_started"] is False for e in observed_errors)
+    assert result["final_response"] == "found"
+    assert result["turn_exit_reason"].startswith("text_response")
+    assert "guardrail" not in result
