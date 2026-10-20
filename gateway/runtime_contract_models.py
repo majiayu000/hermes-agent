@@ -284,6 +284,7 @@ class ActivityStartedPayload(_StrictModel):
 
 
 class ActivityCompletedPayload(_StrictModel):
+    output: JsonObject | None = None
     call_id: NonEmpty512
     name: NonEmpty255
     status: Literal["completed", "failed"]
@@ -356,8 +357,42 @@ class _ErrorEvent(_StrictModel):
     payload: RuntimeError
 
 
+class RuntimeUserInput(_StrictModel):
+    message_id: NonEmpty256
+    text: str
+    attachment_asset_ids: dict[str, list[str]] | None = None
+
+
+class RuntimeInputState(_StrictModel):
+    message_id: NonEmpty256
+    text: str | None = None
+    attachment_asset_ids: dict[str, list[str]] | None = None
+    message: str | None = None
+
+
+class _InputReceivedEvent(_StrictModel):
+    run_id: NonEmpty512 | None = None
+    type: Literal["input_received"]
+    payload: RuntimeInputState
+
+
+class _InputAppliedEvent(_StrictModel):
+    run_id: NonEmpty512 | None = None
+    type: Literal["input_applied"]
+    payload: RuntimeInputState
+
+
+class _InputRejectedEvent(_StrictModel):
+    run_id: NonEmpty512 | None = None
+    type: Literal["input_rejected"]
+    payload: RuntimeInputState
+
+
 RuntimeEvent: TypeAlias = Annotated[
-    _RunStartedEvent
+    _InputReceivedEvent
+    | _InputAppliedEvent
+    | _InputRejectedEvent
+    | _RunStartedEvent
     | _HeartbeatEvent
     | _TextDeltaEvent
     | _ControlRequestEvent

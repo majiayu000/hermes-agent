@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from gateway.runtime_progress import bind_context_activity
+from gateway.runtime_inputs import RuntimeInputs, RuntimeInputMixin
 from gateway.runtime_execution import ExecutionJournal, Execution, RuntimeExecutionMixin, execution_id, lease_epoch, controls_execution, subscribe
 from gateway.runtime_egress import _runtime_llm_egress, _runtime_vision_llm_egress, _configure_run_llm_egress
 
@@ -89,6 +91,7 @@ _SESSIONS: dict[str, "RuntimeBridgeSession"] = {}
 _SESSIONS_LOCK = threading.RLock()
 _REGISTERED_MANAGERS: set[int] = set()
 _LOCAL_ACTIVITY_TOOLS = {
+    "todo",
     "skill_view",
     "tool_search",
     "image_analyze",
@@ -97,6 +100,7 @@ _LOCAL_ACTIVITY_TOOLS = {
     "web_extract",
 }
 _RUNTIME_NATIVE_TOOLS = frozenset({
+    "todo",
     "skill_view",
     "image_analyze",
     "video_analyze",
@@ -936,6 +940,9 @@ class RuntimeBridgeSession:
                 "message": message,
                 "retryable": False,
             }
+        elif name == "todo":
+            output = json.loads(result) if isinstance(result, str) else result
+            payload["output"] = output
         elif name == "skill_view":
             skill_name = (
                 str(args.get("name") or args.get("skill") or "").strip()
@@ -1113,7 +1120,7 @@ class RuntimeBridgeSession:
         self.loop.call_soon_threadsafe(self.finished_async.set)
 
 
-class APIServerRuntimeMixin(RuntimeExecutionMixin):
+class APIServerRuntimeMixin(RuntimeExecutionMixin, RuntimeInputMixin):
     async def _authenticate_runtime_request(self, request: "web.Request") -> "web.Response | None":
         checker = getattr(self, "_check_runtime_auth", None)
         if callable(checker):
@@ -1439,12 +1446,14 @@ class APIServerRuntimeMixin(RuntimeExecutionMixin):
 
         session.execution = execution
         execution.session = session
+        session.inputs = RuntimeInputs(session)
         session.llm_egress = llm_egress
         session.vision_llm_egress = vision_llm_egress
         session.model = requested_model
 
         def configure_agent(agent: Any) -> None:
             native_runtime_tools = {
+                "todo",
                 "skill_view",
                 "web_search",
                 "web_extract",
@@ -1466,7 +1475,12 @@ class APIServerRuntimeMixin(RuntimeExecutionMixin):
                 for tool in native
             ):
                 native.append(_native_video_tool_definition())
+            if not any(tool.get("function", {}).get("name") == "todo" for tool in native):
+                from tools.todo_tool import TODO_SCHEMA
+                native.append({"type": "function", "function": TODO_SCHEMA})
             session.bind_agent(agent, native)
+            bind_context_activity(agent, session)
+            agent._runtime_input_boundary = session.inputs.consume
             agent._session_db = db
             agent._session_db_created = True
             agent.session_id = agent_session_id

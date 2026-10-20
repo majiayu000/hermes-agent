@@ -178,6 +178,7 @@ class RuntimeCapabilityVerifier:
                 "events",
                 "attach",
                 "tool-results",
+                "inputs",
                 "control-results",
                 "suspend",
                 "cancel",

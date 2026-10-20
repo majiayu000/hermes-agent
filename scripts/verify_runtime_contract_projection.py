@@ -112,6 +112,9 @@ def emit_runtime_events(output_directory: Path) -> None:
         "retryable": True,
     }
     events = {
+        "input-received.json": {"run_id": "run_matrix", "type": "input_received", "payload": {"message_id": "m1", "text": "new direction"}},
+        "input-applied.json": {"run_id": "run_matrix", "type": "input_applied", "payload": {"message_id": "m1"}},
+        "input-rejected.json": {"run_id": "run_matrix", "type": "input_rejected", "payload": {"message_id": "m2", "message": "execution ended"}},
         "run-started.json": {
             "run_id": "run_matrix",
             "type": "run_started",

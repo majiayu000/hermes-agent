@@ -1,5 +1,13 @@
 # Runtime contract changelog
 
+## 1.9 — Active Run input and native progress (2026-10-20)
+
+Require `active_input.v1`. The execution-bound `/inputs` control accepts an
+immutable message id. `input_received`, `input_applied`, and `input_rejected`
+report receipt and consumption separately; retries preserve the same message.
+Native activity completion may carry structured output for todo/context progress.
+
+
 ## 1.8.0 — 2026-10-20
 
 Require `execution_subscription.v1`. Start, attach, events and controls bind

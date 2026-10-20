@@ -267,6 +267,7 @@ class _RuntimeAdapter(_TestRuntimeAdapter):
         assert agent._skip_mcp_refresh is True
         assert agent._runtime_deferred_tool_names == {"ultra_media_job_create"}
         assert agent.valid_tool_names == {
+            "todo",
             "ask_user_question",
             "image_analyze",
             "skill_view",

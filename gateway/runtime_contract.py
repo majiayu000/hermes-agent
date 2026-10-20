@@ -24,6 +24,9 @@ RUNTIME_DRIVER_FRAME_TYPES = (
     "usage",
     "completed",
     "error",
+    "input_received",
+    "input_applied",
+    "input_rejected",
 )
 RUNTIME_CAPABILITIES = (
     "abort_attempt",

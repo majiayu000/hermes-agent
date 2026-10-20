@@ -83,6 +83,7 @@ class APIServerLifecycleMixin:
         self._app.router.add_post("/v1/runtime/runs/{run_id}/tool-results", self._handle_runtime_tool_result)
         self._app.router.add_post("/v1/runtime/runs/{run_id}/control-results", self._handle_runtime_control_result)
         self._app.router.add_post("/v1/runtime/runs/{run_id}/suspend", self._handle_runtime_suspend)
+        self._app.router.add_post("/v1/runtime/runs/{run_id}/inputs", self._handle_runtime_input)
         self._app.router.add_post("/v1/runtime/runs/{run_id}/cancel", self._handle_runtime_cancel)
         self._app.router.add_post("/v1/runtime/runs/{run_id}/abort", self._handle_runtime_abort)
 

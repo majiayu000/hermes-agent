@@ -201,7 +201,7 @@ def test_runtime_capability_rejects_retired_generic_interrupt_operation():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('suffix,method,body',[('events','GET',b''),('attach','POST',b'{"model":"test-model"}')])
+@pytest.mark.parametrize('suffix,method,body',[('events','GET',b''),('attach','POST',b'{"model":"test-model"}'),('inputs','POST',b'{"message_id":"test","text":"change"}')])
 async def test_execution_subscription_capability_binds_run_cursor_query_and_body(capability,suffix,method,body):
     from types import SimpleNamespace
     from yarl import URL
