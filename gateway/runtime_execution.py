@@ -35,19 +35,34 @@ class ExecutionJournal:
 
         db._execute_write(initialize)
 
+    @staticmethod
+    def _exists(conn: sqlite3.Connection, execution_id: str, run_id: str, digest: str) -> bool:
+        row = conn.execute(
+            "SELECT run_id, request_digest FROM runtime_executions WHERE execution_id=?",
+            (execution_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        if tuple(row) != (run_id, digest):
+            raise RuntimeSessionStateError(
+                "runtime_execution_conflict",
+                "execution identity has different content",
+                409,
+            )
+        return True
+
+    def exists(self, execution_id: str, run_id: str, digest: str) -> bool:
+        """Check an accepted identity without committing a new execution."""
+        with self.db._lock:
+            conn = self.db._conn
+            assert conn is not None
+            return self._exists(conn, execution_id, run_id, digest)
+
     def create(self, execution_id: str, run_id: str, digest: str) -> bool:
         def write(conn: sqlite3.Connection) -> bool:
-            row = conn.execute(
-                "SELECT run_id, request_digest FROM runtime_executions WHERE execution_id=?",
-                (execution_id,),
-            ).fetchone()
-            if row:
-                if tuple(row) != (run_id, digest):
-                    raise RuntimeSessionStateError(
-                        "runtime_execution_conflict",
-                        "execution identity has different content",
-                        409,
-                    )
+            # Recheck in the write transaction: another owner may have created
+            # this identity after the caller's admission lookup.
+            if self._exists(conn, execution_id, run_id, digest):
                 return False
             conn.execute(
                 "INSERT INTO runtime_executions(execution_id,run_id,request_digest) VALUES(?,?,?)",

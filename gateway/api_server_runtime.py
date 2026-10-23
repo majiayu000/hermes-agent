@@ -1167,7 +1167,19 @@ class APIServerRuntimeMixin(RuntimeExecutionMixin, RuntimeInputMixin):
                 raise ValueError("run_id is required")
             journal = ExecutionJournal(self._ensure_session_db())
             digest = hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-            fresh = journal.create(identity, body["run_id"], digest)
+            fresh = False
+            if not journal.exists(identity, body["run_id"], digest):
+                # Overload rejects admission, not execution. Do not persist a
+                # terminal frame (or an identity) that would poison retries.
+                if not _acquire_run_slot():
+                    return web.json_response({"error": {"code": "runtime_concurrency_exceeded", "retryable": True}}, status=429, headers={"Retry-After": "1"})
+                try:
+                    fresh = journal.create(identity, body["run_id"], digest)
+                finally:
+                    if not fresh:
+                        # Failed writes and raced existing identities did not
+                        # start an Agent and must not retain reserved capacity.
+                        _release_run_slot()
             if not fresh:
                 execution = self._execution_registry().get(identity)
                 if execution is None:
@@ -1182,10 +1194,6 @@ class APIServerRuntimeMixin(RuntimeExecutionMixin, RuntimeInputMixin):
             return web.json_response({"error": {"code": exc.code, "message": str(exc)}}, status=exc.status)
         except (ValueError, TypeError) as exc:
             return web.json_response({"error": {"code": "invalid_param", "message": str(exc)}}, status=422)
-        if not _acquire_run_slot():
-            execution.emit({"run_id": execution.run_id, "type": "error", "payload": runtime_error_envelope("runtime_unavailable", support_id=execution.run_id)}, asyncio.get_running_loop())
-            self._execution_registry().pop(identity, None)
-            return web.json_response({"error": {"code": "runtime_concurrency_exceeded", "retryable": True}}, status=429, headers={"Retry-After": "1"})
         try:
             return await self._handle_runtime_run_gated(request)
         finally:
