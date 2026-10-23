@@ -45,7 +45,7 @@ def _model_parameter_contract(
     """Extract one exact model contract from Runtime-private control data."""
     if not isinstance(result, dict):
         return None
-    if set(result) != {"model", "parameters", "observed_schema_digest"}:
+    if set(result) - {"model", "parameters", "observed_schema_digest", "schema_document"}:
         return None
     model = str(result.get("model") or "").strip()
     digest = str(result.get("observed_schema_digest") or "").strip()

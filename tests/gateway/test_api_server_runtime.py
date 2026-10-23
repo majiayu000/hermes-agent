@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -54,7 +55,25 @@ from gateway.runtime_session_history import RuntimeSessionStateError, seed_runti
 
 aiohttp = pytest.importorskip("aiohttp")
 from aiohttp import web
-from aiohttp.test_utils import TestClient, TestServer
+from aiohttp.test_utils import TestClient as BaseTestClient, TestServer
+
+
+class TestClient(BaseTestClient):
+    async def post(self, path, **kwargs):
+        if not hasattr(self, "executions"):
+            self.executions = {}
+        if path == "/v1/runtime/runs":
+            identity = uuid.uuid4().hex
+            body = kwargs.get("json", {})
+            if isinstance(body, dict):
+                self.executions[body.get("run_id")] = identity
+            path += "?execution_id=" + identity + "&lease_epoch=1"
+        elif path.startswith("/v1/runtime/runs/"):
+            run_id = path.split("/")[4]
+            if run_id in self.executions:
+                path += "?execution_id=" + self.executions[run_id] + "&lease_epoch=1"
+        return await super().post(path, **kwargs)
+
 
 
 def test_replacement_system_prompt_logs_only_safe_digest_diagnostics(caplog):
@@ -133,23 +152,11 @@ async def test_ordinary_route_body_limit_rejects_chunked_bypass():
         await client.close()
 
 
-@pytest.mark.asyncio
-async def test_runtime_stream_emits_private_heartbeat_while_agent_is_quiet(monkeypatch):
-    monkeypatch.setattr(runtime_module, "_RUNTIME_STREAM_HEARTBEAT_SECONDS", 0.01)
-    queue: asyncio.Queue[dict | None] = asyncio.Queue()
-
-    heartbeat = await runtime_module._next_runtime_stream_event(queue)
-    assert heartbeat == {"type": "heartbeat", "payload": {}}
-
-    event = {"type": "text_delta", "payload": {"delta": "ready"}}
-    queue.put_nowait(event)
-    assert await runtime_module._next_runtime_stream_event(queue) is event
-
-
-class _MemorySessionDB:
+class _MemorySessionDB(SessionDB):
     """Small SessionDB-shaped store for runtime handler tests."""
 
     def __init__(self):
+        super().__init__(db_path=Path(":memory:"))
         self.sessions = {}
         self.messages = {}
 
@@ -260,6 +267,7 @@ class _RuntimeAdapter(_TestRuntimeAdapter):
         assert agent._skip_mcp_refresh is True
         assert agent._runtime_deferred_tool_names == {"ultra_media_job_create"}
         assert agent.valid_tool_names == {
+            "todo",
             "ask_user_question",
             "image_analyze",
             "skill_view",
@@ -1490,9 +1498,9 @@ def test_runtime_resume_projects_and_persists_result_without_synthetic_user():
     )
     history = db.get_messages_as_conversation("thread_resume")
     result = {
-        "tool_call_id": "call_media",
-        "status": "succeeded",
-        "output": {"batch_status": "succeeded", "jobs": [{"job_id": "job_1"}]},
+        "call_id": "call_media",
+        "ok": True,
+        "result": {"batch_status": "succeeded", "jobs": [{"job_id": "job_1"}]},
     }
     resumed = _resume_session_db_history(db, "thread_resume", history, [result])
     assert [message["role"] for message in resumed] == ["user", "assistant", "tool"]
@@ -1518,7 +1526,7 @@ def test_runtime_resume_rejects_more_than_one_unfinished_tool_call():
             db,
             "thread_resume_conflict",
             db.get_messages_as_conversation("thread_resume_conflict"),
-            [{"tool_call_id": "call_1", "status": "succeeded", "output": {}}],
+            [{"call_id": "call_1", "ok": True, "result": {}}],
         )
 
 
@@ -1642,9 +1650,9 @@ async def test_runtime_resume_wiring_reaches_agent_without_new_user_message():
                 "digest": digest,
             },
             "tool_results": [{
-                "tool_call_id": "call_media",
-                "status": "succeeded",
-                "output": {"batch_status": "succeeded"},
+                "call_id": "call_media",
+                "ok": True,
+                "result": {"batch_status": "succeeded"},
             }],
             "tools": [{
                 "name": "media.generate_image",
@@ -2752,9 +2760,9 @@ async def test_runtime_rebootstrap_restores_tool_result_without_reexecution():
 
     adapter = CaptureAdapter()
     result = {
-        "tool_call_id": "call-media",
-        "status": "succeeded",
-        "output": {"asset_id": "asset-1"},
+        "call_id": "call-media",
+        "ok": True,
+        "result": {"asset_id": "asset-1"},
     }
     status, events = await _complete_test_run(adapter, _run_body(
         "run_rebootstrap_resume",
@@ -3028,7 +3036,7 @@ async def test_runtime_interrupt_waits_without_thread_pool(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_client_disconnect_interrupts_run_and_clears_session():
+async def test_client_disconnect_keeps_execution_until_explicit_cancel():
     class DisconnectAdapter(_TestRuntimeAdapter):
         def _check_auth(self, _request):
             return None
@@ -3047,7 +3055,7 @@ async def test_client_disconnect_interrupts_run_and_clears_session():
                     break
                 kwargs["stream_delta_callback"](f"delta-{index}")
                 await asyncio.sleep(0.01)
-            assert stop.is_set(), "pump never interrupted the run after disconnect"
+            assert stop.is_set(), "explicit cancellation was not delivered"
             return {"final_response": "stopped"}, {}
 
     adapter = DisconnectAdapter()
@@ -3065,15 +3073,13 @@ async def test_client_disconnect_interrupts_run_and_clears_session():
 
         run_response.close()
 
-        for _ in range(1000):
-            with runtime_module._SESSIONS_LOCK:
-                cleared = "run_disconnect" not in runtime_module._SESSIONS
-            if cleared and session.finished.is_set():
-                break
-            await asyncio.sleep(0.01)
-        else:
-            pytest.fail("run kept going after orchestrator disconnect")
+        await asyncio.sleep(0.03)
+        assert not session.finished.is_set()
+        assert not session.interrupted.is_set()
+        session.interrupt("test requested cancel")
+        await asyncio.wait_for(session.finished_async.wait(), 2)
         assert session.interrupted.is_set()
+
     finally:
         await client.close()
 
@@ -3085,28 +3091,28 @@ def test_resume_history_projects_externalized_output_ref():
         "thread_ext",
         db.get_messages_as_conversation("thread_ext"),
         [{
-            "tool_call_id": "call_ext",
-            "status": "succeeded",
-            "output_ref": "asset://image/01",
+            "call_id": "call_ext",
+            "ok": True,
+            "result": {"status": "externalized", "output_ref": {"ref": "toolout_image_01", "size_bytes": 90000}},
         }],
     )
     assert json.loads(history[-1]["content"]) == {
         "status": "externalized",
-        "output_ref": "asset://image/01",
+        "output_ref": {"ref": "toolout_image_01", "size_bytes": 90000},
     }
 
 
-def test_resume_history_rejects_ambiguous_output_fields():
+def test_resume_history_rejects_fields_outside_canonical_envelope():
     db = _runtime_call_db("thread_inline", ("call_inline", "media.generate_image"))
-    with pytest.raises(ValueError, match="exactly one output field"):
+    with pytest.raises(ValueError, match="output_ref"):
         _resume_session_db_history(
             db,
             "thread_inline",
             db.get_messages_as_conversation("thread_inline"),
             [{
-                "tool_call_id": "call_inline",
-                "status": "succeeded",
-                "output": {"url": "asset://image/1"},
+                "call_id": "call_inline",
+                "ok": True,
+                "result": {"url": "asset://image/1"},
                 "output_ref": "asset://image/01",
             }],
         )
@@ -3191,8 +3197,9 @@ async def test_park_interrupt_defers_tool_result_without_synthetic_error():
 
 
 def test_session_db_resume_appends_real_result_once_and_accepts_redelivery():
-    class RecordingDB:
+    class RecordingDB(_MemorySessionDB):
         def __init__(self):
+            super().__init__()
             self.messages = [{
                 "role": "assistant",
                 "content": None,
@@ -3208,15 +3215,15 @@ def test_session_db_resume_appends_real_result_once_and_accepts_redelivery():
             self.messages.append({"role": message["role"], **message})
 
     result = {
-        "tool_call_id": "call_media",
-        "status": "succeeded",
-        "output": {"asset_id": "asset_1", "url": "asset://image/1"},
+        "call_id": "call_media",
+        "ok": True,
+        "result": {"asset_id": "asset_1", "url": "asset://image/1"},
     }
     db = RecordingDB()
     first = _resume_session_db_history(db, "thread_1", list(db.messages), [result])
     redelivered = {
         **result,
-        "output": {"url": "asset://image/1", "asset_id": "asset_1"},
+        "result": {"url": "asset://image/1", "asset_id": "asset_1"},
     }
     second = _resume_session_db_history(
         db,
@@ -3254,9 +3261,9 @@ def test_session_db_resume_survives_database_reopen(tmp_path):
     reopened = SessionDB(db_path=db_path)
     history = reopened.get_messages_as_conversation(session_id)
     result = {
-        "tool_call_id": "call_restart",
-        "status": "succeeded",
-        "output": {"asset_id": "asset_restart"},
+        "call_id": "call_restart",
+        "ok": True,
+        "result": {"asset_id": "asset_restart"},
     }
     resumed = _resume_session_db_history(reopened, session_id, history, [result])
     assert [message["role"] for message in resumed] == ["user", "assistant", "tool"]
@@ -3272,8 +3279,9 @@ def test_session_db_resume_survives_database_reopen(tmp_path):
 
 @pytest.mark.asyncio
 async def test_runtime_session_db_resume_rebuilds_tool_exposure_from_authoritative_history():
-    class RecordingDB:
+    class RecordingDB(_MemorySessionDB):
         def __init__(self):
+            super().__init__()
             self.messages = [
                 {"role": "user", "content": "make an image"},
                 {
@@ -3360,9 +3368,9 @@ async def test_runtime_session_db_resume_rebuilds_tool_exposure_from_authoritati
             context={"session_id": "thread_session"},
             messages=[],
             tool_results=[{
-                "tool_call_id": "call_media",
-                "status": "succeeded",
-                "output": {"asset_id": "asset_1"},
+                "call_id": "call_media",
+                "ok": True,
+                "result": {"asset_id": "asset_1"},
             }],
             tools=[{
                 "name": "media.generate_image",
@@ -3388,8 +3396,9 @@ async def test_runtime_session_db_resume_rebuilds_tool_exposure_from_authoritati
 async def test_runtime_session_db_resume_projects_generated_output_after_durable_result():
     captured = {}
 
-    class RecordingDB:
+    class RecordingDB(_MemorySessionDB):
         def __init__(self):
+            super().__init__()
             self.messages = [
                 {"role": "user", "content": "make an image"},
                 {
@@ -3499,9 +3508,9 @@ async def test_runtime_session_db_resume_projects_generated_output_after_durable
             context={"session_id": "thread_generated_output"},
             messages=[],
             tool_results=[{
-                "tool_call_id": "call_media",
-                "status": "succeeded",
-                "output": {"asset_id": "asset_1", "output_id": "output_1"},
+                "call_id": "call_media",
+                "ok": True,
+                "result": {"asset_id": "asset_1", "output_id": "output_1"},
             }],
             tools=[{
                 "name": "media.generate_image",

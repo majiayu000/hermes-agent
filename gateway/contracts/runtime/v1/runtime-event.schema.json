@@ -4,7 +4,10 @@
   "title": "Ultra Studio Runtime NDJSON Event",
   "type": "object",
   "additionalProperties": false,
-  "required": ["type", "payload"],
+  "required": [
+    "type",
+    "payload"
+  ],
   "properties": {
     "run_id": {
       "type": "string",
@@ -22,7 +25,10 @@
         "activity_completed",
         "usage",
         "completed",
-        "error"
+        "error",
+        "input_received",
+        "input_applied",
+        "input_rejected"
       ]
     },
     "payload": {
@@ -32,20 +38,44 @@
   "allOf": [
     {
       "if": {
-        "properties": {"type": {"const": "run_started"}},
-        "required": ["type"]
+        "properties": {
+          "type": {
+            "const": "run_started"
+          }
+        },
+        "required": [
+          "type"
+        ]
       },
       "then": {
         "properties": {
           "payload": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["runtime", "system_context_version", "system_context_mode", "system_context_digest"],
+            "required": [
+              "runtime",
+              "system_context_version",
+              "system_context_mode",
+              "system_context_digest"
+            ],
             "properties": {
-              "runtime": {"const": "hermes"},
-              "system_context_version": {"type": "string", "minLength": 1},
-              "system_context_mode": {"enum": ["profile", "replace"]},
-              "system_context_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+              "runtime": {
+                "const": "hermes"
+              },
+              "system_context_version": {
+                "type": "string",
+                "minLength": 1
+              },
+              "system_context_mode": {
+                "enum": [
+                  "profile",
+                  "replace"
+                ]
+              },
+              "system_context_digest": {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$"
+              }
             }
           }
         }
@@ -53,8 +83,14 @@
     },
     {
       "if": {
-        "properties": {"type": {"const": "heartbeat"}},
-        "required": ["type"]
+        "properties": {
+          "type": {
+            "const": "heartbeat"
+          }
+        },
+        "required": [
+          "type"
+        ]
       },
       "then": {
         "properties": {
@@ -67,17 +103,27 @@
     },
     {
       "if": {
-        "properties": {"type": {"const": "text_delta"}},
-        "required": ["type"]
+        "properties": {
+          "type": {
+            "const": "text_delta"
+          }
+        },
+        "required": [
+          "type"
+        ]
       },
       "then": {
         "properties": {
           "payload": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["delta"],
+            "required": [
+              "delta"
+            ],
             "properties": {
-              "delta": {"type": "string"}
+              "delta": {
+                "type": "string"
+              }
             }
           }
         }
@@ -85,8 +131,14 @@
     },
     {
       "if": {
-        "properties": {"type": {"const": "runtime_control_request"}},
-        "required": ["type"]
+        "properties": {
+          "type": {
+            "const": "runtime_control_request"
+          }
+        },
+        "required": [
+          "type"
+        ]
       },
       "then": {
         "properties": {
@@ -95,26 +147,53 @@
             "oneOf": [
               {
                 "additionalProperties": false,
-                "required": ["request_id", "kind", "model"],
+                "required": [
+                  "request_id",
+                  "kind",
+                  "model"
+                ],
                 "properties": {
-                  "request_id": {"type": "string", "minLength": 1, "maxLength": 128},
-                  "kind": {"const": "model_contract.get"},
-                  "model": {"type": "string", "minLength": 1, "maxLength": 512}
+                  "request_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "kind": {
+                    "const": "model_contract.get"
+                  },
+                  "model": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  }
                 }
               },
               {
                 "additionalProperties": false,
-                "required": ["request_id", "kind", "reference_id", "media_type"],
+                "required": [
+                  "request_id",
+                  "kind",
+                  "reference_id",
+                  "media_type"
+                ],
                 "properties": {
-                  "request_id": {"type": "string", "minLength": 1, "maxLength": 128},
-                  "kind": {"const": "media_reference.resolve"},
+                  "request_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "kind": {
+                    "const": "media_reference.resolve"
+                  },
                   "reference_id": {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 512,
                     "pattern": "^(asset|output)_[A-Za-z0-9][A-Za-z0-9._-]*$"
                   },
-                  "media_type": {"const": "image"}
+                  "media_type": {
+                    "const": "image"
+                  }
                 }
               },
               {
@@ -127,16 +206,26 @@
                   "include_transcript"
                 ],
                 "properties": {
-                  "request_id": {"type": "string", "minLength": 1, "maxLength": 128},
-                  "kind": {"const": "video_evidence.prepare"},
+                  "request_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "kind": {
+                    "const": "video_evidence.prepare"
+                  },
                   "reference_id": {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 512,
                     "pattern": "^(asset|output)_[A-Za-z0-9][A-Za-z0-9._-]*$"
                   },
-                  "media_type": {"const": "video"},
-                  "include_transcript": {"type": "boolean"}
+                  "media_type": {
+                    "const": "video"
+                  },
+                  "include_transcript": {
+                    "type": "boolean"
+                  }
                 }
               }
             ]
@@ -146,8 +235,14 @@
     },
     {
       "if": {
-        "properties": {"type": {"const": "tool_request"}},
-        "required": ["type"]
+        "properties": {
+          "type": {
+            "const": "tool_request"
+          }
+        },
+        "required": [
+          "type"
+        ]
       },
       "then": {
         "properties": {
@@ -159,19 +254,39 @@
     },
     {
       "if": {
-        "properties": {"type": {"const": "activity_started"}},
-        "required": ["type"]
+        "properties": {
+          "type": {
+            "const": "activity_started"
+          }
+        },
+        "required": [
+          "type"
+        ]
       },
       "then": {
         "properties": {
           "payload": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["call_id", "name", "arguments"],
+            "required": [
+              "call_id",
+              "name",
+              "arguments"
+            ],
             "properties": {
-              "call_id": {"type": "string", "minLength": 1, "maxLength": 512},
-              "name": {"type": "string", "minLength": 1, "maxLength": 255},
-              "arguments": {"type": "object"}
+              "call_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+              },
+              "arguments": {
+                "type": "object"
+              }
             }
           }
         }
@@ -179,21 +294,51 @@
     },
     {
       "if": {
-        "properties": {"type": {"const": "activity_completed"}},
-        "required": ["type"]
+        "properties": {
+          "type": {
+            "const": "activity_completed"
+          }
+        },
+        "required": [
+          "type"
+        ]
       },
       "then": {
         "properties": {
           "payload": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["call_id", "name", "status"],
+            "required": [
+              "call_id",
+              "name",
+              "status"
+            ],
             "properties": {
-              "call_id": {"type": "string", "minLength": 1, "maxLength": 512},
-              "name": {"type": "string", "minLength": 1, "maxLength": 255},
-              "status": {"enum": ["completed", "failed"]},
-              "arguments": {"type": "object"},
-              "error": {"$ref": "error.schema.json"}
+              "call_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+              },
+              "status": {
+                "enum": [
+                  "completed",
+                  "failed"
+                ]
+              },
+              "arguments": {
+                "type": "object"
+              },
+              "error": {
+                "$ref": "error.schema.json"
+              },
+              "output": {
+                "type": "object"
+              }
             }
           }
         }
@@ -201,29 +346,50 @@
     },
     {
       "if": {
-        "properties": {"type": {"const": "usage"}},
-        "required": ["type"]
+        "properties": {
+          "type": {
+            "const": "usage"
+          }
+        },
+        "required": [
+          "type"
+        ]
       },
       "then": {
         "properties": {
-          "payload": {"type": "object"}
+          "payload": {
+            "type": "object"
+          }
         }
       }
     },
     {
       "if": {
-        "properties": {"type": {"const": "completed"}},
-        "required": ["type"]
+        "properties": {
+          "type": {
+            "const": "completed"
+          }
+        },
+        "required": [
+          "type"
+        ]
       },
       "then": {
         "properties": {
           "payload": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["finish_reason", "text"],
+            "required": [
+              "finish_reason",
+              "text"
+            ],
             "properties": {
-              "finish_reason": {"const": "stop"},
-              "text": {"type": "string"}
+              "finish_reason": {
+                "const": "stop"
+              },
+              "text": {
+                "type": "string"
+              }
             }
           }
         }
@@ -231,12 +397,69 @@
     },
     {
       "if": {
-        "properties": {"type": {"const": "error"}},
-        "required": ["type"]
+        "properties": {
+          "type": {
+            "const": "error"
+          }
+        },
+        "required": [
+          "type"
+        ]
       },
       "then": {
         "properties": {
-          "payload": {"$ref": "error.schema.json"}
+          "payload": {
+            "$ref": "error.schema.json"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "enum": [
+              "input_received",
+              "input_applied",
+              "input_rejected"
+            ]
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "message_id"
+            ],
+            "properties": {
+              "message_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "text": {
+                "type": "string"
+              },
+              "attachment_asset_ids": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
         }
       }
     }
@@ -244,6 +467,6 @@
   "x-ultra-contract": {
     "name": "ultra.runtime.runtime-event",
     "major": 1,
-    "minor": 6
+    "minor": 9
   }
 }

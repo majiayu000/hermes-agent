@@ -45,6 +45,8 @@ def test_runtime_manifest_contract_is_negotiable_and_contains_real_limits():
         },
         "intents": ["bootstrap", "new_turn", "resume", "retry", "rebootstrap"],
         "features": [
+            "active_input.v1",
+            "execution_subscription.v1",
             "invoked_skills.v1",
             "llm_egress.v1",
             "media_reference_resolution.v1",

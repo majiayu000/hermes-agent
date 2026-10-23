@@ -11,12 +11,15 @@ import logging
 import json
 import time
 from copy import deepcopy
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 OBSERVER_SCHEMA_VERSION = "hermes.observer.v1"
+# Host-owned correlation only; never an authorization or execution input.
+observer_run_id: ContextVar[str] = ContextVar("observer_run_id", default="")
 MIDDLEWARE_SCHEMA_VERSION = "hermes.middleware.v1"
 
 TOOL_REQUEST_MIDDLEWARE = "tool_request"
@@ -48,6 +51,8 @@ class RequestMiddlewareResult:
 
 def observer_payload(**kwargs: Any) -> Dict[str, Any]:
     kwargs.setdefault("telemetry_schema_version", OBSERVER_SCHEMA_VERSION)
+    if run_id := observer_run_id.get():
+        kwargs["run_id"] = run_id
     return kwargs
 
 

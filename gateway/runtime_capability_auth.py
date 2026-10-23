@@ -175,7 +175,10 @@ class RuntimeCapabilityVerifier:
             remainder = path[len(prefix):]
             parts = remainder.split("/", 1)
             if len(parts) != 2 or parts[1] not in {
+                "events",
+                "attach",
                 "tool-results",
+                "inputs",
                 "control-results",
                 "suspend",
                 "cancel",

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from gateway.runtime_progress import bind_context_activity
+from gateway.runtime_inputs import RuntimeInputs, RuntimeInputMixin
+from gateway.runtime_execution import ExecutionJournal, Execution, RuntimeExecutionMixin, execution_id, lease_epoch, controls_execution, subscribe
 from gateway.runtime_egress import _runtime_llm_egress, _runtime_vision_llm_egress, _configure_run_llm_egress
 
 import asyncio
@@ -54,6 +57,7 @@ from gateway.runtime_contract_models import (
 from agent.tool_dispatch_helpers import DeferredToolResult
 from gateway.runtime_session_history import (
     RuntimeSessionStateError as _RuntimeSessionStateError,
+    _project_tool_result,
     load_runtime_session_history as _load_runtime_session_history,
     retry_session_db_history as _retry_session_db_history,
     resume_session_db_history as _resume_session_db_history,
@@ -87,6 +91,7 @@ _SESSIONS: dict[str, "RuntimeBridgeSession"] = {}
 _SESSIONS_LOCK = threading.RLock()
 _REGISTERED_MANAGERS: set[int] = set()
 _LOCAL_ACTIVITY_TOOLS = {
+    "todo",
     "skill_view",
     "tool_search",
     "image_analyze",
@@ -95,6 +100,7 @@ _LOCAL_ACTIVITY_TOOLS = {
     "web_extract",
 }
 _RUNTIME_NATIVE_TOOLS = frozenset({
+    "todo",
     "skill_view",
     "image_analyze",
     "video_analyze",
@@ -108,7 +114,6 @@ _RUNTIME_MAX_CONCURRENT_ENV = "HERMES_RUNTIME_MAX_CONCURRENT"
 _RUNTIME_MAX_CONCURRENT_DEFAULT = 8
 
 
-_RUNTIME_STREAM_HEARTBEAT_SECONDS = 15.0
 # Safety cap for pending.ready.wait when the run carries no explicit deadline;
 # prevents a lost tool result from pinning an executor thread forever.
 _UNBOUNDED_TOOL_WAIT_CAP_SECONDS = 3600.0
@@ -128,21 +133,6 @@ _RUNTIME_EXECUTOR: ThreadPoolExecutor | None = None
 _ACTIVE_RUN_COUNT = 0
 _SWEEPERS: dict[int, tuple[asyncio.AbstractEventLoop, "asyncio.Task[None]"]] = {}
 _NO_SKILL_MANIFEST = object()
-
-
-async def _next_runtime_stream_event(
-    queue: "asyncio.Queue[dict[str, Any] | None]",
-) -> dict[str, Any] | None:
-    """Return the next bridge event or a transport-only keepalive frame."""
-    try:
-        return await asyncio.wait_for(
-            queue.get(),
-            timeout=_RUNTIME_STREAM_HEARTBEAT_SECONDS,
-        )
-    except asyncio.TimeoutError:
-        heartbeat: dict[str, Any] = {"type": "heartbeat", "payload": {}}
-        decode_runtime_event(heartbeat)
-        return heartbeat
 
 
 def _runtime_max_concurrent() -> int:
@@ -306,7 +296,7 @@ def _failed_tool_result_projection(transport: Any) -> dict[str, Any]:
         return _invalid_failed_tool_result()
     if decoded.ok:
         return _invalid_failed_tool_result()
-    return {key: value for key, value in transport.items() if key not in {"call_id", "request_id", "ok"}}
+    return decoded.agent_content()
 
 
 def _skill_scope_error(name: str) -> str:
@@ -725,6 +715,10 @@ class RuntimeBridgeSession:
         self.loop = loop
         self.queue = queue
         self.session_db = session_db
+        self.execution = None
+        self.llm_egress = None
+        self.vision_llm_egress = None
+        self.model = ""
         self.definitions = {str(item["name"]): dict(item) for item in definitions}
         self.tool_names = set(self.definitions)
         self.tool_exposure = tool_exposure or build_runtime_tool_exposure(
@@ -893,6 +887,9 @@ class RuntimeBridgeSession:
             raise RuntimeError(
                 f"Runtime event {event_type!r} violates the canonical contract"
             ) from None
+        if self.execution is not None:
+            self.execution.emit(event, self.loop)
+            return
         try:
             if asyncio.get_running_loop() is self.loop:
                 self.queue.put_nowait(event)
@@ -943,6 +940,9 @@ class RuntimeBridgeSession:
                 "message": message,
                 "retryable": False,
             }
+        elif name == "todo":
+            output = json.loads(result) if isinstance(result, str) else result
+            payload["output"] = output
         elif name == "skill_view":
             skill_name = (
                 str(args.get("name") or args.get("skill") or "").strip()
@@ -1054,30 +1054,46 @@ class RuntimeBridgeSession:
                 code, message = "runtime_deadline_exceeded", "tool-result deadline exceeded"
             return json.dumps({"error": {"code": code, "message": message, "retryable": False}})
         result = pending.result or {}
-        if result.get("ok"):
-            return json.dumps(result.get("result"), ensure_ascii=False, separators=(",", ":"))
-        failure = _failed_tool_result_projection(result)
-        return json.dumps(failure, ensure_ascii=False, separators=(",", ":"))
+        content = decode_runtime_tool_result(result).agent_content()
+        return json.dumps(content, ensure_ascii=False, separators=(",", ":"))
 
     def submit_result(self, result: dict[str, Any]) -> bool:
         call_id = str(result.get("call_id") or "")
         with self.lock:
-            pending = self.pending.pop(call_id, None)
+            pending = self.pending.get(call_id)
             if pending is None:
                 return False
+            if pending.result is not None:
+                return pending.result == result
+            # The assistant call was persisted before emitting tool_request.
+            # Commit its result before waking the Agent or acknowledging the host.
+            message = _project_tool_result({"function": {"name": pending.name}}, result)
+            self.session_db.append_message(
+                session_id=self.agent_session_id,
+                role="tool",
+                content=message["content"],
+                tool_name=message["name"],
+                tool_call_id=call_id,
+            )
             pending.result = result
             pending.ready.set()
-        return True
+            return True
 
     def submit_control_result(self, result: dict[str, Any]) -> bool:
         request_id = str(result.get("request_id") or "")
         with self.lock:
-            pending = self.pending_controls.pop(request_id, None)
+            pending = self.pending_controls.get(request_id)
             if pending is None:
                 return False
+            if pending.result is not None:
+                return pending.result == result
             pending.result = result
             pending.ready.set()
         return True
+
+    def refresh_egress(self, body: dict) -> None:
+        from gateway.runtime_egress import refresh_run_egress
+        refresh_run_egress(self, body)
 
     def interrupt(self, reason: str) -> None:
         self.interrupt_reason = reason
@@ -1104,7 +1120,7 @@ class RuntimeBridgeSession:
         self.loop.call_soon_threadsafe(self.finished_async.set)
 
 
-class APIServerRuntimeMixin:
+class APIServerRuntimeMixin(RuntimeExecutionMixin, RuntimeInputMixin):
     async def _authenticate_runtime_request(self, request: "web.Request") -> "web.Response | None":
         checker = getattr(self, "_check_runtime_auth", None)
         if callable(checker):
@@ -1143,24 +1159,41 @@ class APIServerRuntimeMixin:
         auth_error = await self._authenticate_runtime_request(request)
         if auth_error:
             return auth_error
-        # Concurrency gate before response.prepare: over-limit requests are
-        # rejected with a retryable 429 instead of queueing on the executor.
+        try:
+            identity = execution_id(request)
+            lease_epoch(request)
+            body = await request.json()
+            if not isinstance(body, dict) or not isinstance(body.get("run_id"), str) or not body["run_id"]:
+                raise ValueError("run_id is required")
+            journal = ExecutionJournal(self._ensure_session_db())
+            digest = hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            fresh = journal.create(identity, body["run_id"], digest)
+            if not fresh:
+                execution = self._execution_registry().get(identity)
+                if execution is None:
+                    if not journal.finished(identity, body["run_id"]):
+                        raise _RuntimeSessionStateError("runtime_execution_not_found", "original execution no longer exists", 409)
+                    execution = Execution(identity, body["run_id"], journal)
+                return await subscribe(request, execution)
+            execution = Execution(identity, body["run_id"], journal)
+            self._execution_registry()[identity] = execution
+            request["runtime_execution"] = execution
+        except _RuntimeSessionStateError as exc:
+            return web.json_response({"error": {"code": exc.code, "message": str(exc)}}, status=exc.status)
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": {"code": "invalid_param", "message": str(exc)}}, status=422)
         if not _acquire_run_slot():
-            return web.json_response(
-                {
-                    "error": {
-                        "code": "runtime_concurrency_exceeded",
-                        "message": f"too many concurrent runtime runs (max {_runtime_max_concurrent()})",
-                        "retryable": True,
-                    },
-                },
-                status=429,
-                headers={"Retry-After": "1"},
-            )
+            execution.emit({"run_id": execution.run_id, "type": "error", "payload": runtime_error_envelope("runtime_unavailable", support_id=execution.run_id)}, asyncio.get_running_loop())
+            self._execution_registry().pop(identity, None)
+            return web.json_response({"error": {"code": "runtime_concurrency_exceeded", "retryable": True}}, status=429, headers={"Retry-After": "1"})
         try:
             return await self._handle_runtime_run_gated(request)
         finally:
-            _release_run_slot()
+            if execution.task is None:
+                _release_run_slot()
+                self._execution_registry().pop(identity, None)
+                if not journal.finished(identity, execution.run_id):
+                    execution.emit({"run_id": execution.run_id, "type": "error", "payload": runtime_error_envelope("runtime_unavailable", support_id=execution.run_id)}, asyncio.get_running_loop())
 
     async def _handle_runtime_run_gated(self, request: "web.Request") -> "web.StreamResponse":
         media_temp_dir: tempfile.TemporaryDirectory[str] | None = None
@@ -1291,6 +1324,10 @@ class APIServerRuntimeMixin:
                 ) from exc
             schemas = _tool_schemas(definitions)
             tool_exposure = build_runtime_tool_exposure(definitions, schemas)
+            with _SESSIONS_LOCK:
+                existing = _SESSIONS.get(requested_agent_session_id)
+                if existing is not None and not existing.finished.is_set():
+                    raise _RuntimeSessionStateError("runtime_session_conflict", "session is already active", 409)
             media_temp_dir = tempfile.TemporaryDirectory(prefix="hermes-runtime-media-")
             db, agent_session_id, session_history = _load_runtime_session_history(
                 self,
@@ -1381,13 +1418,9 @@ class APIServerRuntimeMixin:
             if media_temp_dir is not None:
                 media_temp_dir.cleanup()
             return web.json_response({"error": {"code": "invalid_param", "message": str(exc)}}, status=422)
-        response = web.StreamResponse(status=200, headers={
-            "Content-Type": "application/x-ndjson",
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        })
-        await response.prepare(request)
-        queue: "asyncio.Queue[dict[str, Any] | None]" = asyncio.Queue()
+        execution = request["runtime_execution"]
+        queue: asyncio.Queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
         session = RuntimeBridgeSession(
             run_id,
             asyncio.get_running_loop(),
@@ -1404,25 +1437,23 @@ class APIServerRuntimeMixin:
         _ensure_runtime_middleware()
         _ensure_session_sweeper()
         with _SESSIONS_LOCK:
-            if run_id in _SESSIONS or agent_session_id in _SESSIONS:
-                conflict_event = {
-                    "run_id": run_id,
-                    "type": "error",
-                    "payload": runtime_error_envelope(
-                        "run_state_conflict",
-                        support_id=run_id,
-                    ),
-                }
-                decode_runtime_event(conflict_event)
-                await response.write(encode_runtime_event(conflict_event) + b"\n")
+            if any(key in _SESSIONS and not _SESSIONS[key].finished.is_set() for key in (run_id, agent_session_id)):
                 if media_temp_dir is not None:
                     media_temp_dir.cleanup()
-                return response
+                return web.json_response({"error": {"code": "runtime_session_conflict", "message": "session is already active"}}, status=409)
             _SESSIONS[run_id] = session
             _SESSIONS[agent_session_id] = session
 
+        session.execution = execution
+        execution.session = session
+        session.inputs = RuntimeInputs(session)
+        session.llm_egress = llm_egress
+        session.vision_llm_egress = vision_llm_egress
+        session.model = requested_model
+
         def configure_agent(agent: Any) -> None:
             native_runtime_tools = {
+                "todo",
                 "skill_view",
                 "web_search",
                 "web_extract",
@@ -1444,7 +1475,12 @@ class APIServerRuntimeMixin:
                 for tool in native
             ):
                 native.append(_native_video_tool_definition())
+            if not any(tool.get("function", {}).get("name") == "todo" for tool in native):
+                from tools.todo_tool import TODO_SCHEMA
+                native.append({"type": "function", "function": TODO_SCHEMA})
             session.bind_agent(agent, native)
+            bind_context_activity(agent, session)
+            agent._runtime_input_boundary = session.inputs.consume
             agent._session_db = db
             agent._session_db_created = True
             agent.session_id = agent_session_id
@@ -1481,104 +1517,93 @@ class APIServerRuntimeMixin:
         ) -> None:
             session.complete_local_activity(tool_call_id, function_name, function_args, function_result)
 
-        async def pump() -> None:
-            while True:
-                event = await _next_runtime_stream_event(queue)
-                if event is None:
-                    return
-                try:
-                    await response.write(encode_runtime_event(event) + b"\n")
-                except Exception as exc:
-                    # The orchestrator went away; without an interrupt the
-                    # agent keeps running and events pile into the queue.
-                    logger.warning(
-                        "Runtime bridge stream write failed for run %s; interrupting: %s",
-                        run_id,
-                        exc,
-                    )
-                    session.interrupt("orchestrator stream disconnected")
-                    return
-
-        pump_task = asyncio.create_task(pump())
-        session.emit("run_started", {
-            "runtime": "hermes",
-            "system_context_version": skill_context.system_context_version,
-            "system_context_mode": skill_context.system_context_mode,
-            "system_context_digest": skill_context.system_context_digest,
-        })
-        try:
-            result, usage = await self._run_agent_bridge(
-                user_message=user_message,
-                conversation_history=history,
-                ephemeral_system_prompt=None,
-                session_id=agent_session_id,
-                runtime_message_id=runtime_user_message_id,
-                stream_delta_callback=lambda delta: session.emit("text_delta", {"delta": delta}) if delta else None,
-                tool_start_callback=on_tool_start,
-                tool_complete_callback=on_tool_complete,
-                agent_ref=session.agent_ref,
-                agent_configurator=configure_agent,
-                agent_creation_overrides=(
-                    {
-                        "runtime_overrides": {
-                            "api_key": llm_egress["grant"],
-                            "base_url": llm_egress["base_url"],
-                            "provider": "custom",
-                            "api_mode": "chat_completions",
-                            "command": None,
-                            "args": [],
-                            "credential_pool": None,
-                            "max_tokens": None,
-                        },
-                        "model_override": str(body.get("model") or "").strip(),
-                    }
-                    if llm_egress is not None
-                    else None
-                ),
-                runtime_auxiliary_egress=(
-                    {"vision": vision_llm_egress}
-                    if vision_llm_egress is not None
-                    else None
-                ),
-            )
-            text = str((result or {}).get("final_response") or "")
-            session.emit("usage", usage or {})
-            failed = isinstance(result, dict) and (
-                bool(result.get("failed")) or result.get("completed") is False
-            )
-            if failed:
-                session.emit(
-                    "error",
-                    runtime_error_envelope(
-                        _runtime_failure_code(result),
-                        support_id=run_id,
+        async def execute() -> None:
+            deadline_handle = loop.call_later(deadline_ms / 1000, session.interrupt, "run deadline exceeded") if deadline_ms > 0 else None
+            try:
+                session.emit("run_started", {
+                    "runtime": "hermes",
+                    "system_context_version": skill_context.system_context_version,
+                    "system_context_mode": skill_context.system_context_mode,
+                    "system_context_digest": skill_context.system_context_digest,
+                })
+                result, usage = await self._run_agent_bridge(
+                    user_message=user_message,
+                    conversation_history=history,
+                    ephemeral_system_prompt=None,
+                    session_id=agent_session_id,
+                    runtime_message_id=runtime_user_message_id,
+                    runtime_run_id=run_id,
+                    stream_delta_callback=lambda delta: session.emit("text_delta", {"delta": delta}) if delta else None,
+                    tool_start_callback=on_tool_start,
+                    tool_complete_callback=on_tool_complete,
+                    agent_ref=session.agent_ref,
+                    agent_configurator=configure_agent,
+                    agent_creation_overrides=(
+                        {
+                            "runtime_overrides": {
+                                "api_key": llm_egress["grant"],
+                                "base_url": llm_egress["base_url"],
+                                "provider": "custom",
+                                "api_mode": "chat_completions",
+                                "command": None,
+                                "args": [],
+                                "credential_pool": None,
+                                "max_tokens": None,
+                            },
+                            "model_override": str(body.get("model") or "").strip(),
+                        }
+                        if llm_egress is not None
+                        else None
+                    ),
+                    runtime_auxiliary_egress=(
+                        {"vision": vision_llm_egress}
+                        if vision_llm_egress is not None
+                        else None
                     ),
                 )
-            else:
-                session.emit("completed", {"finish_reason": "stop", "text": text})
-        except asyncio.CancelledError:
-            # aiohttp cancels the handler when the orchestrator disconnects;
-            # the agent may keep running on its executor thread unless told
-            # to stop.
-            logger.warning("Runtime bridge request cancelled for run %s; interrupting", run_id)
-            session.interrupt("orchestrator stream disconnected")
-            raise
-        except Exception as exc:
-            logger.exception("Run Orchestrator runtime run failed: %s", run_id)
-            session.emit(
-                "error",
-                runtime_error_envelope("runtime_unavailable", support_id=run_id),
-            )
-        finally:
-            with _SESSIONS_LOCK:
-                _SESSIONS.pop(run_id, None)
-                _SESSIONS.pop(agent_session_id, None)
-            session.mark_finished()
-            queue.put_nowait(None)
-            await pump_task
-            if media_temp_dir is not None:
-                media_temp_dir.cleanup()
-        return response
+                text = str((result or {}).get("final_response") or "")
+                session.emit("usage", usage or {})
+                failed = isinstance(result, dict) and (
+                    bool(result.get("failed")) or result.get("completed") is False
+                )
+                if failed:
+                    session.emit(
+                        "error",
+                        runtime_error_envelope(
+                            _runtime_failure_code(result),
+                            support_id=run_id,
+                        ),
+                    )
+                else:
+                    session.emit("completed", {"finish_reason": "stop", "text": text})
+            except asyncio.CancelledError:
+                session.interrupt("runtime shutdown")
+                session.emit("error", runtime_error_envelope("runtime_unavailable", support_id=run_id))
+                raise
+            except Exception as exc:
+                logger.exception("Run Orchestrator runtime run failed: %s", run_id)
+                session.emit(
+                    "error",
+                    runtime_error_envelope("runtime_unavailable", support_id=run_id),
+                )
+            finally:
+                if deadline_handle is not None:
+                    deadline_handle.cancel()
+                with _SESSIONS_LOCK:
+                    if _SESSIONS.get(agent_session_id) is session:
+                        _SESSIONS.pop(agent_session_id, None)
+                session.mark_finished()
+                try:
+                    execution.journal.finish(execution.execution_id)
+                finally:
+                    execution.changed.set()
+                    self._execution_registry().pop(execution.execution_id, None)
+                    _release_run_slot()
+                    if media_temp_dir is not None:
+                        media_temp_dir.cleanup()
+
+        execution.task = asyncio.create_task(execute())
+        return await subscribe(request, execution)
 
     async def _handle_runtime_tool_result(self, request: "web.Request") -> "web.Response":
         auth_error = await self._authenticate_runtime_request(request)
@@ -1588,6 +1613,8 @@ class APIServerRuntimeMixin:
         request["hermes_run_id"] = run_id
         with _SESSIONS_LOCK:
             session = _SESSIONS.get(run_id)
+        if session is not None and session.execution is not None and not controls_execution(request, session.execution):
+            return web.json_response({"error": {"code": "runtime_execution_conflict"}}, status=409)
         if session is None:
             return web.json_response({"error": {"code": "run_not_found", "message": "run is not active"}}, status=404)
         try:
@@ -1606,8 +1633,13 @@ class APIServerRuntimeMixin:
                 },
                 status=422,
             )
-        if not isinstance(result, dict) or not session.submit_result(result):
-            return web.json_response({"error": {"code": "invalid_tool_result", "message": "unknown call_id"}}, status=409)
+        try:
+            accepted = await asyncio.to_thread(session.submit_result, result)
+        except Exception:
+            logger.exception("Runtime tool result persistence failed for run %s", run_id)
+            return web.json_response({"error": {"code": "runtime_session_unavailable", "message": "Tool result could not be persisted"}}, status=503)
+        if not accepted:
+            return web.json_response({"error": {"code": "invalid_tool_result", "message": "unknown call_id or conflicting result"}}, status=409)
         return web.Response(status=204)
 
     async def _handle_runtime_control_result(self, request: "web.Request") -> "web.Response":
@@ -1618,6 +1650,8 @@ class APIServerRuntimeMixin:
         request["hermes_run_id"] = run_id
         with _SESSIONS_LOCK:
             session = _SESSIONS.get(run_id)
+        if session is not None and session.execution is not None and not controls_execution(request, session.execution):
+            return web.json_response({"error": {"code": "runtime_execution_conflict"}}, status=409)
         if session is None:
             return web.json_response(
                 {"error": {"code": "run_not_found", "message": "run is not active"}},
@@ -1645,6 +1679,8 @@ class APIServerRuntimeMixin:
         request["hermes_run_id"] = run_id
         with _SESSIONS_LOCK:
             session = _SESSIONS.get(run_id)
+        if session is not None and session.execution is not None and not controls_execution(request, session.execution):
+            return web.json_response({"error": {"code": "runtime_execution_conflict"}}, status=409)
         if session is None:
             return web.json_response({"error": {"code": "run_not_found", "message": "run is not active"}}, status=404)
         body = await request.json()

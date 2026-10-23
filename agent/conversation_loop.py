@@ -682,6 +682,10 @@ def run_conversation(
                 and "skill_manage" in agent.valid_tool_names):
             agent._iters_since_skill += 1
         
+        runtime_input_boundary = getattr(agent, "_runtime_input_boundary", None)
+        if runtime_input_boundary:
+            runtime_input_boundary(messages, conversation_history)
+
         # ── Pre-API-call /steer drain ──────────────────────────────────
         # If a /steer arrived during the previous API call (while the model
         # was thinking), drain it now — before we build api_messages — so
@@ -4320,6 +4324,14 @@ def run_conversation(
 
                 agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
 
+                # A parked tool call is an unfinished durable checkpoint. Do not
+                # start context compression (another model request), or alter
+                # its tool history, while the host waits for suspension.
+                if getattr(agent, "_runtime_deferred_tool_call_id", None):
+                    agent._session_messages = messages
+                    _turn_exit_reason = "runtime_suspended"
+                    break
+
                 if agent._tool_guardrail_halt_decision is not None:
                     decision = agent._tool_guardrail_halt_decision
                     _turn_exit_reason = "guardrail_halt"
@@ -4801,7 +4813,10 @@ def run_conversation(
                     continue
 
                 messages.append(final_msg)
-                
+                runtime_input_boundary = getattr(agent, "_runtime_input_boundary", None)
+                if runtime_input_boundary and runtime_input_boundary(messages, conversation_history, finishing=True):
+                    continue
+
                 _turn_exit_reason = f"text_response(finish_reason={finish_reason})"
                 if not agent.quiet_mode:
                     agent._safe_print(f"🎉 Conversation completed after {api_call_count} OpenAI-compatible API call(s)")

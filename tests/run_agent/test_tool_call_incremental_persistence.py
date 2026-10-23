@@ -68,6 +68,7 @@ def _make_agent():
         patch("agent.model_metadata.fetch_model_metadata", return_value={}),
     ):
         agent = AIAgent(
+            model="test/model",
             api_key="test-key",
             base_url="https://openrouter.ai/api/v1",
             quiet_mode=True,
@@ -440,9 +441,9 @@ def test_runtime_park_tail_reopens_and_resumes_real_result_exactly_once(tmp_path
     assert [message["tool_call_id"] for message in durable_results] == ["call_sibling"]
 
     real_result = {
-        "tool_call_id": "call_park",
-        "status": "succeeded",
-        "output": {"asset_id": "asset-real"},
+        "call_id": "call_park",
+        "ok": True,
+        "result": {"asset_id": "asset-real"},
     }
     resumed = resume_session_db_history(
         reopened,
@@ -466,7 +467,7 @@ def test_runtime_park_tail_reopens_and_resumes_real_result_exactly_once(tmp_path
 
     conflicting_result = {
         **real_result,
-        "output": {"asset_id": "asset-conflict"},
+        "result": {"asset_id": "asset-conflict"},
     }
     with pytest.raises(RuntimeSessionStateError) as conflict:
         resume_session_db_history(
@@ -532,3 +533,35 @@ def test_execute_tool_calls_concurrent_flushes_each_tool_result_in_order():
     # production flush call breaks one of these assertions.
     assert flushed_tool_ids == ["c1", "c2"]
     assert flush_lengths == [1, 2]
+
+
+def test_parked_tool_skips_context_compression_and_extra_model_calls():
+    agent = _make_agent()
+    agent.client.chat.completions.create.return_value = _mock_response(
+        content="", finish_reason="tool_calls", tool_calls=[_mock_tool_call(call_id="call_park")],
+    )
+    agent.compression_enabled = True
+    agent.context_compressor.last_prompt_tokens = 100_000
+
+    def park(*_args, **_kwargs):
+        agent._runtime_deferred_tool_call_id = "call_park"
+        agent.iteration_budget.exhaust()
+
+    with (
+        patch.object(agent, "_persist_session") as persist,
+        patch.object(agent, "_flush_messages_to_session_db"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+        patch.object(agent, "_execute_tool_calls", side_effect=park),
+        patch.object(agent.context_compressor, "should_compress", return_value=True),
+        patch.object(agent, "_compress_context") as compress,
+        patch.object(agent, "_handle_max_iterations") as summarize,
+    ):
+        agent.run_conversation("test suspension")
+
+    compress.assert_not_called()
+    summarize.assert_not_called()
+    assert agent.client.chat.completions.create.call_count == 1
+    assert persist.called
+    assert persist.call_args.args[0][-1]["tool_calls"][0]["id"] == "call_park"
+    assert agent._session_messages[-1]["tool_calls"][0]["id"] == "call_park"

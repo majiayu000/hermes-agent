@@ -49,7 +49,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Union
 from hermes_constants import get_hermes_home
 from utils import env_var_enabled, fast_safe_load
 from hermes_cli.config import cfg_get
-from hermes_cli.middleware import OBSERVER_SCHEMA_VERSION, VALID_MIDDLEWARE
+from hermes_cli.middleware import OBSERVER_SCHEMA_VERSION, VALID_MIDDLEWARE, observer_payload
 
 
 def get_bundled_plugins_dir() -> Path:
@@ -1797,7 +1797,7 @@ class PluginManager:
         are reused.  All injected context is ephemeral — never
         persisted to session DB.
         """
-        kwargs.setdefault("telemetry_schema_version", OBSERVER_SCHEMA_VERSION)
+        kwargs = observer_payload(**kwargs)
         callbacks = self._hooks.get(hook_name, [])
         results: List[Any] = []
         for cb in callbacks:

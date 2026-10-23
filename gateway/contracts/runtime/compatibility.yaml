@@ -1,7 +1,7 @@
 contract_name: ultra.runtime
 contract_major: 1
-min_minor: 6
-max_minor: 6
+min_minor: 9
+max_minor: 9
 runtime_protocol_version: "2"
 schemas:
   - error.schema.json
@@ -17,6 +17,8 @@ intents:
   - retry
   - rebootstrap
 features:
+  - active_input.v1
+  - execution_subscription.v1
   - invoked_skills.v1
   - llm_egress.v1
   - media_reference_resolution.v1
@@ -37,3 +39,6 @@ runtime_frame_types:
   - usage
   - completed
   - error
+  - input_received
+  - input_applied
+  - input_rejected

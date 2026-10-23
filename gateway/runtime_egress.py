@@ -67,3 +67,33 @@ def _configure_run_llm_egress(agent: object, capability: dict[str, str] | None, 
     ):
         raise ValueError("agent run-scoped LLM egress configuration is inconsistent")
     agent._run_llm_egress = True
+
+
+def refresh_run_egress(session: object, body: dict) -> None:
+    """Rebind host credentials on the original live Agent; never restart a turn."""
+    if body.get("model") != session.model:
+        raise ValueError("attach model differs from original execution")
+    primary = _runtime_llm_egress(body.get("llm_egress"), required=session.llm_egress is not None)
+    vision = _runtime_vision_llm_egress(body.get("vision_llm_egress"))
+    for old, new in ((session.llm_egress, primary), (session.vision_llm_egress, vision)):
+        if (old is None) != (new is None):
+            raise ValueError("attach cannot change execution capability scopes")
+        if old is not None and (old["base_url"] != new["base_url"] or old.get("model") != new.get("model")):
+            raise ValueError("attach cannot change model or egress route")
+    with session.lock:
+        agent = session.agent_ref[0]
+        if primary is not None:
+            if agent is not None:
+                if not getattr(agent, "_run_llm_egress", False):
+                    raise ValueError("original Agent does not own run-scoped egress")
+                # Existing in-flight requests retain their own headers. Future
+                # requests use the renewed grant without replacing the client,
+                # clearing history, or replaying a model operation.
+                with agent._openai_client_lock():
+                    agent.api_key = primary["grant"]
+                    agent._client_kwargs["api_key"] = primary["grant"]
+                    if agent.client is not None:
+                        agent.client.api_key = primary["grant"]
+            session.llm_egress.update(primary)
+        if vision is not None:
+            session.vision_llm_egress.update(vision)
