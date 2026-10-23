@@ -135,7 +135,9 @@ class TestRuntimeCapacityRetry(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(rejected.status, 429)
             self.assertTrue((await rejected.json())["error"]["retryable"])
         with self.db._lock:
-            row = self.db._conn.execute(
+            conn = self.db._conn
+            assert conn is not None
+            row = conn.execute(
                 "SELECT execution_id FROM runtime_executions WHERE execution_id=?",
                 (self.prefix + "retry",),
             ).fetchone()

@@ -54,7 +54,9 @@ class ExecutionJournal:
     def exists(self, execution_id: str, run_id: str, digest: str) -> bool:
         """Check an accepted identity without committing a new execution."""
         with self.db._lock:
-            return self._exists(self.db._conn, execution_id, run_id, digest)
+            conn = self.db._conn
+            assert conn is not None
+            return self._exists(conn, execution_id, run_id, digest)
 
     def create(self, execution_id: str, run_id: str, digest: str) -> bool:
         def write(conn: sqlite3.Connection) -> bool:
